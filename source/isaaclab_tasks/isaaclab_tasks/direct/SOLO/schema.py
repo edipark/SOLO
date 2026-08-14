@@ -6,7 +6,7 @@ from dataclasses import asdict, dataclass
 from typing import Mapping, Sequence
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 # Canonical order exposed by the 29-DOF G1 asset. Reference NPZ files are
 # name-mapped because the published walk and dance files use different orders.
@@ -68,6 +68,23 @@ G1_KEY_BODY_NAMES = (
     "left_ankle_roll_link",
 )
 
+AMP_PRIVILEGED_NAMES = (
+    "base_height",
+    "base_tangent_x",
+    "base_tangent_y",
+    "base_tangent_z",
+    "base_normal_x",
+    "base_normal_y",
+    "base_normal_z",
+    "base_lin_vel_x",
+    "base_lin_vel_y",
+    "base_lin_vel_z",
+    "base_ang_vel_x",
+    "base_ang_vel_y",
+    "base_ang_vel_z",
+    *tuple(f"{body}_{axis}" for body in G1_KEY_BODY_NAMES for axis in ("x", "y", "z")),
+)
+
 
 @dataclass(frozen=True)
 class ObservationSchema:
@@ -123,7 +140,8 @@ class ObservationSchema:
 AMP_OBSERVATION_SCHEMA = ObservationSchema(
     name="g1_amp_101",
     policy_dim=101,
-    estimator_target_indices=(65, 66, 67, 68, 69, 70, 62, 63, 64),
+    estimator_target_indices=tuple(range(58, 101)),
+    estimator_target_names=AMP_PRIVILEGED_NAMES,
 )
 
 # PPO layout: estimated base state(9), command(3), q(29), qd(29), previous action(29).

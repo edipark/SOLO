@@ -14,6 +14,10 @@
 **/*.usdc
 **/*.usdz
 
+# SOLO's self-contained G1 asset is required at runtime and tracked with Git LFS.
+!source/isaaclab_tasks/isaaclab_tasks/direct/SOLO/assets/g1_29dof_rev_1_0.usd
+!source/isaaclab_tasks/isaaclab_tasks/direct/SOLO/assets/instanceable_meshes.usd
+
 # Python
 .DS_Store
 **/*.egg-info/

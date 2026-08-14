@@ -8,9 +8,10 @@ with a learned state estimator. The G1 environment and reference motions are ada
 [`linden713/humanoid_amp`](https://github.com/linden713/humanoid_amp); the estimator/DAgger workflow follows
 `SOLO_DEXTRA`.
 
-The default estimator uses every G1 joint: 29 joint positions plus the 29 simulator joint velocities (58D). It predicts
-root linear velocity, root angular velocity, and gravity/orientation state (9D). No finite-difference velocity,
-encoder quantization, or EMA filtering is used.
+The default estimator uses every G1 joint: 29 joint positions plus the 29 simulator joint velocities (58D). For AMP it
+predicts the complete 43D privileged suffix: height, tangent/normal basis, root velocities, and ten key-body relative
+positions. PPO keeps its policy-specific 9D base-state target. No finite-difference velocity, encoder quantization, or
+EMA filtering is used.
 
 ## Pipeline
 
@@ -18,7 +19,7 @@ encoder quantization, or EMA filtering is used.
 
 Train an AMP walk or dance teacher with the 101D G1 motion observation. Both environments combine their task reward
 with the learned style reward. With SKRL 2.x, the independent default scales are
-`task_reward_scale: 1.0` and `style_reward_scale: 2.0`; they are not weights that sum to one.
+`task_reward_scale: 0.5` and `style_reward_scale: 1.0`, matching the effective Dextra reward composition.
 Physics runs at 120 Hz with decimation 4 (30 Hz policy control), and the discriminator receives four policy-spaced
 AMP frames (4 x 101D = 404D). Episodes last 20 seconds. The walk task uses a 0.6 m/s reference-aligned target and
 Dextra-style action-rate and normalized torque-saturation penalties; dance keeps posture/height rewards without a
@@ -27,7 +28,18 @@ velocity target.
 ```bash
 # Walk AMP
 ./isaaclab.sh -p scripts/reinforcement_learning/skrl/train.py \
-  --task Isaac-G1-AMP-Walk-SOLO-Direct-v0 --algorithm AMP --headless
+  --task Isaac-G1-AMP-Walk-SOLO-Direct-v0 --algorithm AMP \
+  --experiment_name dextra_aligned --headless
+
+# Resume while explicitly restoring Dextra's initial exploration std
+./isaaclab.sh -p scripts/reinforcement_learning/skrl/train.py \
+  --task Isaac-G1-AMP-Walk-SOLO-Direct-v0 --algorithm AMP \
+  --checkpoint <agent.pt> --reset_log_std -1.2 --headless
+
+# Video also writes action/position/torque diagnostics next to the recording
+./isaaclab.sh -p scripts/reinforcement_learning/skrl/play.py \
+  --task Isaac-G1-AMP-Walk-SOLO-Direct-v0 --algorithm AMP \
+  --checkpoint <best_agent.pt> --video --video_length 600 --print-base-velocity
 
 # Dance AMP
 ./isaaclab.sh -p scripts/reinforcement_learning/skrl/train.py \
@@ -50,12 +62,13 @@ Collect frozen-teacher rollouts and train the default two-layer, hidden-256 LSTM
   --estimator LSTM --window 50 --joint-preset all --dagger-rounds 10 --headless
 ```
 
-The basic teacher-student baseline uses all 58 joint values and a `256-256-128` MLP to predict the teacher's 29D
-action. `--dagger-rounds 0` is vanilla offline distillation; a positive value enables Student DAgger.
+The DAgger student uses all 58 joint values and a `256-256-128` MLP to predict the teacher's 29D action. It uses an
+online running normalizer, a GPU replay ring buffer, beta-decayed teacher mixing, periodic pure-student evaluation,
+and saves `student_latest.pt` plus `student_best_eval.pt`.
 
 ```bash
-./isaaclab.sh -p source/isaaclab_tasks/isaaclab_tasks/direct/SOLO/train_distillation.py \
-  --teacher-checkpoint <best_agent.pt> --dagger-rounds 0 --headless
+./isaaclab.sh -p source/isaaclab_tasks/isaaclab_tasks/direct/SOLO/train_dagger.py \
+  --teacher-checkpoint <best_agent.pt> --num-iterations 300 --headless
 ```
 
 ### Phase 3 — estimated-state inference
@@ -64,9 +77,12 @@ Teacher checkpoints are loaded through SKRL's public `Runner`/`agent.load()` API
 evaluation API and can produce an action/estimate CSV alongside a video.
 
 ```bash
-./isaaclab.sh -p source/isaaclab_tasks/isaaclab_tasks/direct/SOLO/play_with_estimator.py \
+./isaaclab.sh -p source/isaaclab_tasks/isaaclab_tasks/direct/SOLO/play_teacher_with_estimator.py \
   --teacher-checkpoint <best_agent.pt> --estimator-checkpoint <best_estimator.pt> \
-  --task Isaac-G1-AMP-Walk-SOLO-Direct-v0 --rollout-csv logs/rollout.csv
+  --task Isaac-G1-AMP-Walk-SOLO-Direct-v0 --csv-output logs/rollout.csv --video
+
+./isaaclab.sh -p source/isaaclab_tasks/isaaclab_tasks/direct/SOLO/play_dagger.py \
+  --checkpoint <student_best_eval.pt> --video
 ```
 
 ## Motion tools
@@ -81,14 +97,15 @@ validation, matplotlib visualization, Isaac Sim replay/recording, conversion, pe
 
 # Isaac Sim replay; --record-output writes another compatible NPZ
 ./isaaclab.sh -p source/isaaclab_tasks/isaaclab_tasks/direct/SOLO/tools/replay_motion.py \
-  --motion source/isaaclab_tasks/isaaclab_tasks/direct/SOLO/motions/G1_dance.npz
+  --motion source/isaaclab_tasks/isaaclab_tasks/direct/SOLO/motions/G1_dance.npz \
+  --speed 1.0 --video --video-length 600 --print-base-velocity
 ```
 
 Motion-variance generators and Dextra-specific AX18/hardware/system-identification code are intentionally excluded.
 
 ## Ablation
 
-The runner covers teacher, estimator architecture/history/joint presets, vanilla distillation, and Student DAgger for
+The runner covers teacher, estimator architecture/history/joint presets, and Student DAgger for
 AMP walk, AMP dance, and PPO walk. A failed run is recorded and the remaining matrix continues. Each task needs its
 own teacher checkpoint mapping.
 
@@ -112,15 +129,7 @@ are supported metric fields.
   `style_reward_scale`.
 - Legacy keys such as `amp_state_preprocessor`, `*_reward_weight`, `discriminator_reward_scale`, `lambda`, and
   `clip_predicted_values` are rejected with migration hints.
-- Native loading never guesses checkpoint module names. SKRL 1.x module-name conversion is explicit:
-
-```bash
-./isaaclab.sh -p source/isaaclab_tasks/isaaclab_tasks/direct/SOLO/tools/convert_legacy_checkpoint.py \
-  old_agent.pt converted_agent.pt
-```
-
-The converted module names do not guarantee architecture compatibility; always validate the checkpoint in a short
-play run.
+- Checkpoint loaders accept only the current schema-v2 estimator and DAgger formats. Retrain older G1 checkpoints.
 
 ## Layout
 
@@ -132,10 +141,10 @@ source/isaaclab_tasks/isaaclab_tasks/direct/SOLO/
 ├── estimator/                           # models, adapters, collection and training
 ├── agents/                              # SKRL 2.x AMP/PPO YAML
 ├── motions/                             # reference data and conversion/view tools
-├── tools/                               # replay, tracking, legacy conversion
+├── tools/                               # replay, tracking, rollout diagnostics
 ├── train_state_estimator.py
-├── train_distillation.py
-├── play_with_estimator.py
+├── train_dagger.py
+├── play_teacher_with_estimator.py, play_dagger.py
 └── run_ablation.py, reporting.py
 ```
 

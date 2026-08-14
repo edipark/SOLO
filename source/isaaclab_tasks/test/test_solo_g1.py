@@ -6,6 +6,7 @@ import importlib.util
 import json
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -29,6 +30,10 @@ compat = _load_module("solo_g1_compat_test", SOLO_DIR / "skrl_compat.py")
 models = _load_module("solo_g1_models_test", SOLO_DIR / "estimator" / "models.py")
 reporting = _load_module("solo_g1_reporting_test", SOLO_DIR / "reporting.py")
 task_math = _load_module("solo_g1_task_math_test", SOLO_DIR / "task_math.py")
+motion_loader = _load_module("solo_g1_motion_loader_test", SOLO_DIR / "motions" / "motion_loader.py")
+rollout_diagnostics = _load_module(
+    "solo_g1_rollout_diagnostics_test", SOLO_DIR / "tools" / "rollout_diagnostics.py"
+)
 
 
 def test_joint_presets_and_dimensions():
@@ -60,6 +65,15 @@ def test_reference_motions_have_the_same_joint_set():
         assert set(names) == set(schema.G1_JOINT_NAMES)
 
 
+def test_motion_speed_scale_updates_timing_and_velocities():
+    motion_path = SOLO_DIR / "motions" / "G1_walk.npz"
+    nominal = motion_loader.MotionLoader(str(motion_path), torch.device("cpu"), speed_scale=1.0)
+    faster = motion_loader.MotionLoader(str(motion_path), torch.device("cpu"), speed_scale=2.0)
+    assert faster.duration == pytest.approx(nominal.duration / 2.0)
+    assert torch.allclose(faster.dof_velocities, nominal.dof_velocities * 2.0)
+    assert torch.allclose(faster.body_linear_velocities, nominal.body_linear_velocities * 2.0)
+
+
 def test_dextra_aligned_timing_and_amp_history():
     import numpy as np
 
@@ -71,6 +85,31 @@ def test_dextra_aligned_timing_and_amp_history():
     times = task_math.reference_history_times(np.array([1.0])).reshape(1, -1)
     assert times.shape == (1, 4)
     assert np.diff(times[0]) == pytest.approx([-1.0 / 30.0] * 3)
+
+
+def test_normalized_actions_are_clipped_before_joint_target_mapping():
+    actions = torch.tensor([[-2.0, -1.0, 0.25, 1.0, 3.0]])
+    clipped = task_math.clip_normalized_actions(actions)
+    assert clipped.tolist() == [[-1.0, -1.0, 0.25, 1.0, 1.0]]
+    assert actions.tolist() == [[-2.0, -1.0, 0.25, 1.0, 3.0]]
+    with pytest.raises(ValueError, match="positive"):
+        task_math.clip_normalized_actions(actions, limit=0.0)
+
+
+def test_midpoint_action_mapping_uses_soft_joint_half_range():
+    limits = torch.tensor([[-2.0, 4.0], [-0.5, 1.5]])
+    offset, scale = task_math.soft_limit_action_parameters(limits)
+    assert torch.equal(offset, torch.tensor([1.0, 0.5]))
+    assert torch.equal(scale, torch.tensor([3.0, 1.0]))
+    actions = torch.tensor([[-2.0, 0.25], [1.0, 3.0]])
+    targets = task_math.normalized_action_to_position(actions, offset, scale)
+    assert torch.equal(targets, torch.tensor([[-2.0, 0.75], [4.0, 1.5]]))
+
+
+def test_skrl_action_clipping_is_delegated_to_the_environment():
+    for path in (SOLO_DIR / "agents").glob("*.yaml"):
+        config = yaml.safe_load(path.read_text(encoding="utf-8"))
+        assert config["models"]["policy"]["clip_actions"] is False
 
 
 def test_dextra_aligned_task_reward_and_saturation():
@@ -109,23 +148,142 @@ def test_dextra_aligned_task_reward_and_saturation():
 
 
 def test_observation_schemas_round_trip():
+    assert schema.SCHEMA_VERSION == 2
     assert schema.AMP_OBSERVATION_SCHEMA.policy_dim == 101
-    assert schema.AMP_OBSERVATION_SCHEMA.estimator_target_dim == 9
+    assert schema.AMP_OBSERVATION_SCHEMA.estimator_target_dim == 43
+    assert schema.AMP_OBSERVATION_SCHEMA.estimator_target_indices == tuple(range(58, 101))
+    assert len(schema.AMP_PRIVILEGED_NAMES) == 43
     assert schema.PPO_OBSERVATION_SCHEMA.policy_dim == 99
     assert schema.ObservationSchema.from_dict(schema.AMP_OBSERVATION_SCHEMA.to_dict()) == schema.AMP_OBSERVATION_SCHEMA
 
 
+def test_amp_estimator_replaces_all_privileged_columns_only():
+    observations = torch.zeros(2, 101)
+    observations[:, :58] = 7.0
+    estimate = torch.arange(86, dtype=torch.float32).reshape(2, 43)
+    injected = task_math.inject_observation_estimate(
+        observations, estimate, schema.AMP_OBSERVATION_SCHEMA.estimator_target_indices
+    )
+    assert torch.equal(injected[:, :58], observations[:, :58])
+    assert torch.equal(injected[:, 58:], estimate)
+    assert torch.equal(observations[:, 58:], torch.zeros(2, 43))
+
+
 @pytest.mark.parametrize("model_type,window", (("LSTM", 50), ("TCN", 50), ("MLP", 1)))
 def test_estimator_shapes(model_type, window):
-    estimator = models.build_estimator(model_type, input_dim=58, output_dim=9)
+    estimator = models.build_estimator(model_type, input_dim=58, output_dim=43)
     sample = torch.randn(3, window, 58)
-    assert estimator(sample).shape == (3, 9)
-    estimator.set_normalization(sample, torch.randn(3, 9))
-    assert estimator.predict(sample).shape == (3, 9)
+    assert estimator(sample).shape == (3, 43)
+    estimator.set_normalization(sample, torch.randn(3, 43))
+    assert estimator.predict(sample).shape == (3, 43)
 
 
-def test_vanilla_student_shape():
-    assert models.VanillaStudent()(torch.randn(4, 58)).shape == (4, 29)
+def test_default_estimator_matches_amp_schema_v2():
+    estimator = models.build_estimator("LSTM")
+    assert estimator.input_dim == 58
+    assert estimator.output_dim == schema.AMP_OBSERVATION_SCHEMA.estimator_target_dim == 43
+
+
+def test_dagger_student_normalizer_and_replay_buffer():
+    student = models.DaggerStudent()
+    assert student(torch.randn(4, 58)).shape == (4, 29)
+    normalizer = models.RunningNormalizer(2, "cpu")
+    values = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
+    normalizer.update(values)
+    restored = models.RunningNormalizer(2, "cpu")
+    restored.load_state_dict(normalizer.state_dict())
+    assert torch.allclose(normalizer.normalize(values), restored.normalize(values))
+    replay = models.ReplayBuffer(3, 2, 1, "cpu")
+    replay.add(torch.arange(10, dtype=torch.float32).reshape(5, 2), torch.arange(5, dtype=torch.float32)[:, None])
+    assert replay.size == 3
+    observations, actions = replay.sample(4)
+    assert observations.shape == (4, 2) and actions.shape == (4, 1)
+
+
+def test_dagger_beta_schedule():
+    assert models.dagger_beta(1.0, 0.5, 0.2, 0) == pytest.approx(1.0)
+    assert models.dagger_beta(1.0, 0.5, 0.2, 1) == pytest.approx(0.5)
+    assert models.dagger_beta(1.0, 0.5, 0.2, 10) == pytest.approx(0.2)
+    with pytest.raises(ValueError):
+        models.dagger_beta(1.2, 0.5, 0.2, 0)
+
+
+def test_dagger_v2_checkpoint_round_trip(tmp_path):
+    student = models.DaggerStudent()
+    observation_normalizer = models.RunningNormalizer(58, "cpu")
+    action_normalizer = models.RunningNormalizer(29, "cpu")
+    observation_normalizer.update(torch.randn(8, 58))
+    action_normalizer.update(torch.randn(8, 29))
+    checkpoint = {
+        "solo_schema_version": schema.SCHEMA_VERSION,
+        "kind": "dagger_student",
+        "model_config": student.config(),
+        "model_state_dict": student.state_dict(),
+        "observation_normalizer": observation_normalizer.state_dict(),
+        "action_normalizer": action_normalizer.state_dict(),
+    }
+    path = tmp_path / "student.pt"
+    torch.save(checkpoint, path)
+    loaded = torch.load(path, map_location="cpu", weights_only=True)
+    assert loaded["solo_schema_version"] == 2
+    assert loaded["kind"] == "dagger_student"
+    restored = models.DaggerStudent(**{
+        "input_dim": loaded["model_config"]["input_dim"],
+        "action_dim": loaded["model_config"]["action_dim"],
+        "hidden_dims": tuple(loaded["model_config"]["hidden_dims"]),
+    })
+    restored.load_state_dict(loaded["model_state_dict"])
+    sample = torch.randn(4, 58)
+    assert torch.allclose(student(sample), restored(sample))
+
+
+def test_dextra_aligned_pipeline_entry_points():
+    for name in ("train_state_estimator.py", "train_dagger.py", "play_teacher_with_estimator.py", "play_dagger.py"):
+        assert (SOLO_DIR / name).is_file()
+    assert not (SOLO_DIR / "train_distillation.py").exists()
+    assert not (SOLO_DIR / "play_with_estimator.py").exists()
+
+
+def test_rollout_diagnostics_npz_and_plot(tmp_path):
+    joint_count = 3
+    data = SimpleNamespace(
+        joint_names=("j0", "j1", "j2"),
+        joint_pos=torch.zeros(1, joint_count),
+        computed_torque=torch.ones(1, joint_count),
+        applied_torque=torch.full((1, joint_count), 0.5),
+        joint_effort_limits=torch.full((1, joint_count), 2.0),
+    )
+    core = SimpleNamespace(
+        action_offset=torch.zeros(joint_count),
+        action_scale=torch.ones(joint_count),
+        robot=SimpleNamespace(data=data),
+    )
+    recorder = rollout_diagnostics.RolloutDiagnostics(core)
+    recorder.record(torch.tensor([[2.0, 0.0, -2.0]]))
+    artifacts = recorder.save(tmp_path, 1.0 / 30.0)
+    assert Path(artifacts["data"]).is_file()
+    assert Path(artifacts["plot"]).is_file()
+    assert len(artifacts["joint_plots"]) == joint_count
+    assert all(Path(path).is_file() for path in artifacts["joint_plots"])
+
+
+def test_dextra_aligned_environment_and_implicit_actuator_source():
+    env_source = (SOLO_DIR / "g1_amp_env_cfg.py").read_text(encoding="utf-8")
+    robot_source = (SOLO_DIR / "g1_robot_cfg.py").read_text(encoding="utf-8")
+    assert 'reset_strategy = "default"' in env_source
+    assert "vel_window_min_vx = 0.01" in env_source
+    assert "vel_window_steps = 10" in env_source
+    assert "saturation_penalty = 0.05" in env_source
+    assert "env_spacing=4.0" in env_source
+    assert "GroundPlaneCfg" in (SOLO_DIR / "g1_amp_env.py").read_text(encoding="utf-8")
+    assert "DCMotorCfg" not in robot_source
+    assert 'effort_limit_sim={".*_hip_.*": 88.0, ".*_knee_joint": 139.0}' in robot_source
+    assert 'velocity_limit_sim={".*_hip_.*": 32.0, ".*_knee_joint": 20.0}' in robot_source
+    assert 'damping={".*_ankle_pitch_joint": 0.2, ".*_ankle_roll_joint": 0.1}' in robot_source
+    assert 'effort_limit_sim={"waist_yaw_joint": 88.0' in robot_source
+    assert 'stiffness=5000.0' in robot_source
+    assert 'effort_limit_sim=300.0' in robot_source
+    assert 'stiffness=3000.0' in robot_source
 
 
 def test_skrl_2_yaml_and_style_scale():
@@ -146,16 +304,16 @@ def test_skrl_2_yaml_and_style_scale():
         assert config["models"]["policy"]["initial_log_std"] == pytest.approx(-1.2)
         assert config["trainer"]["timesteps"] == 80000
         if config["agent"]["class"] == "AMP":
-            assert config["agent"]["task_reward_scale"] == pytest.approx(1.0)
-            assert config["agent"]["style_reward_scale"] == pytest.approx(2.0)
+            assert config["agent"]["task_reward_scale"] == pytest.approx(0.5)
+            assert config["agent"]["style_reward_scale"] == pytest.approx(1.0)
             assert config["agent"]["discriminator_loss_scale"] == pytest.approx(6.0)
-            assert config["models"]["policy"]["network"][0]["layers"] == [1024, 512]
-            assert config["models"]["discriminator"]["network"][0]["layers"] == [2048, 1024, 512]
+            assert config["models"]["policy"]["network"][0]["layers"] == [512, 256]
+            assert config["models"]["discriminator"]["network"][0]["layers"] == [1024, 512, 256]
     raw_task, raw_style = torch.tensor([1.5]), torch.tensor([0.25])
     task, style, total = compat.scaled_reward(raw_task, raw_style)
-    assert task.item() == pytest.approx(1.5)
-    assert style.item() == pytest.approx(0.5)
-    assert total.item() == pytest.approx(2.0)
+    assert task.item() == pytest.approx(0.75)
+    assert style.item() == pytest.approx(0.25)
+    assert total.item() == pytest.approx(1.0)
 
 
 @pytest.mark.parametrize("key", tuple(compat.OBSOLETE_KEYS))

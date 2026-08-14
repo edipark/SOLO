@@ -119,20 +119,29 @@ def _plots(output: Path, rows: list[dict], raw_rows: list[dict]) -> list[str]:
             figure.savefig(path)
             artifacts.append(path.name)
         plt.close(figure)
-    targets = [
-        (f"{row.get('experiment')}/s{row.get('seed')}", row.get("metrics", {}).get("target_rmse"))
-        for row in raw_rows if row.get("status") == "ok" and row.get("metrics", {}).get("target_rmse")
-    ]
-    if targets:
-        figure, axis = plt.subplots(figsize=(10, max(4, len(targets) * 0.35)))
-        image = axis.imshow([values for _, values in targets], aspect="auto")
-        axis.set_yticks(range(len(targets)), [label for label, _ in targets], fontsize=7)
-        axis.set_xticks(range(9), ["lvx", "lvy", "lvz", "avx", "avy", "avz", "gx", "gy", "gz"])
-        axis.set_title("Estimator target RMSE heatmap")
+    targets_by_dim: dict[int, list[tuple[str, list, list | None]]] = defaultdict(list)
+    for row in raw_rows:
+        values = row.get("metrics", {}).get("target_rmse")
+        if row.get("status") == "ok" and values:
+            targets_by_dim[len(values)].append(
+                (
+                    f"{row.get('experiment')}/s{row.get('seed')}",
+                    values,
+                    row.get("metrics", {}).get("target_names"),
+                )
+            )
+    for dimension, targets in targets_by_dim.items():
+        figure, axis = plt.subplots(figsize=(max(10, dimension * 0.3), max(4, len(targets) * 0.35)))
+        image = axis.imshow([values for _, values, _ in targets], aspect="auto")
+        axis.set_yticks(range(len(targets)), [label for label, _, _ in targets], fontsize=7)
+        names = next((names for _, _, names in targets if names), None) or [f"t{i}" for i in range(dimension)]
+        axis.set_xticks(range(dimension), names, rotation=90, fontsize=6)
+        axis.set_title(f"Estimator target RMSE heatmap ({dimension}D)")
         figure.colorbar(image, ax=axis)
         figure.tight_layout()
+        stem = "target_rmse_heatmap" if len(targets_by_dim) == 1 else f"target_rmse_heatmap_{dimension}d"
         for suffix in ("png", "pdf"):
-            path = output / f"target_rmse_heatmap.{suffix}"
+            path = output / f"{stem}.{suffix}"
             figure.savefig(path)
             artifacts.append(path.name)
         plt.close(figure)
@@ -161,9 +170,12 @@ def _plots(output: Path, rows: list[dict], raw_rows: list[dict]) -> list[str]:
     if trace_row:
         target = trace_row["metrics"]["trace_target"]
         prediction = trace_row["metrics"]["trace_prediction"]
-        figure, axes = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
+        trace_dimensions = min(9, len(target[0]))
+        groups = math.ceil(trace_dimensions / 3)
+        figure, axes = plt.subplots(groups, 1, figsize=(10, 2.6 * groups), sharex=True)
+        axes = [axes] if groups == 1 else axes
         for group, axis in enumerate(axes):
-            for offset in range(3):
+            for offset in range(min(3, trace_dimensions - group * 3)):
                 index = group * 3 + offset
                 axis.plot([row[index] for row in target], alpha=0.65, label=f"target {index}")
                 axis.plot([row[index] for row in prediction], linestyle="--", alpha=0.65, label=f"estimate {index}")
@@ -203,7 +215,7 @@ def generate_report(raw_jsonl: str | Path, output_dir: str | Path) -> dict:
     failures = [row for row in raw_rows if row.get("status") != "ok"]
     report = [
         "# SOLO G1 Ablation Report", "", f"Runs: {len(raw_rows)}; failures: {len(failures)}", "",
-        "The default AMP reward scales are task=1.0 and style=2.0. Scales are independent and do not sum to one.", "",
+        "The Dextra-aligned AMP reward scales are task=0.5 and style=1.0.", "",
         "## Results", "", table, "", "## Artifacts", "",
         f"Plots: {', '.join(plots) if plots else 'none'}",
     ]

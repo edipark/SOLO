@@ -38,6 +38,15 @@ parser.add_argument(
     "--distributed", action="store_true", default=False, help="Run training with multiple GPUs or nodes."
 )
 parser.add_argument("--checkpoint", type=str, default=None, help="Path to model checkpoint to resume training.")
+parser.add_argument(
+    "--experiment_name", type=str, default=None, help="Suffix appended to the generated experiment name."
+)
+parser.add_argument(
+    "--reset_log_std",
+    type=float,
+    default=None,
+    help="Reset policy log_std after loading a checkpoint (for example, -1.2).",
+)
 parser.add_argument("--max_iterations", type=int, default=None, help="RL Policy training iterations.")
 parser.add_argument("--export_io_descriptors", action="store_true", default=False, help="Export IO descriptors.")
 parser.add_argument(
@@ -84,6 +93,7 @@ from datetime import datetime
 
 import gymnasium as gym
 import skrl
+import torch
 from packaging import version
 
 # check for minimum supported skrl version
@@ -175,6 +185,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     print(f"Exact experiment name requested from command line: {log_dir}")
     if agent_cfg["agent"]["experiment"]["experiment_name"]:
         log_dir += f"_{agent_cfg['agent']['experiment']['experiment_name']}"
+    if args_cli.experiment_name:
+        log_dir += f"_{args_cli.experiment_name}"
     # set directory into agent config
     agent_cfg["agent"]["experiment"]["directory"] = log_root_path
     agent_cfg["agent"]["experiment"]["experiment_name"] = log_dir
@@ -231,6 +243,21 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     if resume_path:
         print(f"[INFO] Loading model checkpoint from: {resume_path}")
         runner.agent.load(resume_path)
+        if args_cli.reset_log_std is not None:
+            if not args_cli.ml_framework.startswith("torch"):
+                raise RuntimeError("--reset_log_std is supported only for torch agents")
+            policy = getattr(runner.agent, "policy", None)
+            if policy is None:
+                raise RuntimeError("--reset_log_std requested, but the loaded agent has no policy model")
+            reset_count = 0
+            with torch.no_grad():
+                for name, parameter in policy.named_parameters():
+                    if "log_std" in name:
+                        parameter.fill_(args_cli.reset_log_std)
+                        reset_count += 1
+            if reset_count == 0:
+                raise RuntimeError("--reset_log_std requested, but no policy log_std parameter was found")
+            print(f"[INFO] Reset {reset_count} policy log_std parameter(s) to {args_cli.reset_log_std:.4f}")
 
     # run training
     runner.run()

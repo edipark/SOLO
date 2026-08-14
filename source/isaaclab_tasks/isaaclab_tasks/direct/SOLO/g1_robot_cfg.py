@@ -46,29 +46,39 @@ G1_SOLO_CFG = ArticulationCfg(
     ),
     soft_joint_pos_limit_factor=0.9,
     actuators={
-        "legs_waist": ImplicitActuatorCfg(
-            joint_names_expr=[".*_hip_.*", ".*_knee_joint", "waist_.*_joint"],
-            effort_limit_sim=300.0,
-            velocity_limit_sim=100.0,
-            stiffness={".*_hip_.*": 175.0, ".*_knee_joint": 200.0, "waist_.*": 200.0},
-            damping=5.0,
-            armature=0.01,
+        # Isaac Lab's G1_29DOF motor parameters, expressed entirely as
+        # PhysX-backed implicit drives for parity with SOLO_DEXTRA.
+        "legs": ImplicitActuatorCfg(
+            joint_names_expr=[".*_hip_.*", ".*_knee_joint"],
+            effort_limit_sim={".*_hip_.*": 88.0, ".*_knee_joint": 139.0},
+            velocity_limit_sim={".*_hip_.*": 32.0, ".*_knee_joint": 20.0},
+            stiffness={".*_hip_.*": 100.0, ".*_knee_joint": 200.0},
+            damping={".*_hip_.*": 2.5, ".*_knee_joint": 5.0},
+            armature=0.03,
         ),
         "feet": ImplicitActuatorCfg(
             joint_names_expr=[".*_ankle_pitch_joint", ".*_ankle_roll_joint"],
             effort_limit_sim=50.0,
-            velocity_limit_sim=100.0,
+            velocity_limit_sim=37.0,
             stiffness=20.0,
-            damping=2.0,
-            armature=0.01,
+            damping={".*_ankle_pitch_joint": 0.2, ".*_ankle_roll_joint": 0.1},
+            armature=0.03,
+        ),
+        "waist": ImplicitActuatorCfg(
+            joint_names_expr=["waist_.*_joint"],
+            effort_limit_sim={"waist_yaw_joint": 88.0, "waist_roll_joint": 50.0, "waist_pitch_joint": 50.0},
+            velocity_limit_sim={"waist_yaw_joint": 32.0, "waist_roll_joint": 37.0, "waist_pitch_joint": 37.0},
+            stiffness=5000.0,
+            damping=5.0,
+            armature=0.001,
         ),
         "arms": ImplicitActuatorCfg(
             joint_names_expr=[".*_shoulder_.*", ".*_elbow_joint", ".*_wrist_.*"],
             effort_limit_sim=300.0,
             velocity_limit_sim=100.0,
-            stiffness=40.0,
+            stiffness=3000.0,
             damping=10.0,
-            armature=0.01,
+            armature=0.001,
         ),
     },
 )

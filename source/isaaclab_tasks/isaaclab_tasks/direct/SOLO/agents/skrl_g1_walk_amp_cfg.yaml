@@ -4,6 +4,8 @@ models:
   separate: true
   policy:
     class: GaussianMixin
+    # The environment clips normalized actions because DirectRLEnv exposes an
+    # unbounded Box and therefore provides no limits to GaussianMixin.
     clip_actions: false
     clip_log_std: true
     min_log_std: -3.5
@@ -13,7 +15,7 @@ models:
     network:
       - name: net
         input: OBSERVATIONS
-        layers: [1024, 512]
+        layers: [512, 256]
         activations: relu
     output: ACTIONS
   value:
@@ -22,7 +24,7 @@ models:
     network:
       - name: net
         input: OBSERVATIONS
-        layers: [1024, 512]
+        layers: [512, 256]
         activations: relu
     output: ONE
   discriminator:
@@ -31,7 +33,7 @@ models:
     network:
       - name: net
         input: OBSERVATIONS
-        layers: [2048, 1024, 512]
+        layers: [1024, 512, 256]
         activations: relu
     output: ONE
 
@@ -68,12 +70,14 @@ agent:
   grad_norm_clip: 0.0
   ratio_clip: 0.2
   value_clip: 0.2
-  entropy_loss_scale: 0.0
+  entropy_loss_scale: 0.005
   value_loss_scale: 2.5
   discriminator_loss_scale: 6.0
   amp_batch_size: 512
-  task_reward_scale: 1.0
-  style_reward_scale: 2.0
+  # SKRL 2.x equivalent of Dextra's task_weight=0.5 and
+  # style_weight=0.5 * discriminator_reward_scale=2.0.
+  task_reward_scale: 0.5
+  style_reward_scale: 1.0
   discriminator_batch_size: 4096
   discriminator_logit_regularization_scale: 0.05
   discriminator_gradient_penalty_scale: 5.0

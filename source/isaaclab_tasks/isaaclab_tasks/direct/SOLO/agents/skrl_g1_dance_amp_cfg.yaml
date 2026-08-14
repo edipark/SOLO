@@ -13,7 +13,7 @@ models:
     network:
       - name: net
         input: OBSERVATIONS
-        layers: [1024, 512]
+        layers: [512, 256]
         activations: relu
     output: ACTIONS
   value:
@@ -22,7 +22,7 @@ models:
     network:
       - name: net
         input: OBSERVATIONS
-        layers: [1024, 512]
+        layers: [512, 256]
         activations: relu
     output: ONE
   discriminator:
@@ -31,7 +31,7 @@ models:
     network:
       - name: net
         input: OBSERVATIONS
-        layers: [2048, 1024, 512]
+        layers: [1024, 512, 256]
         activations: relu
     output: ONE
 
@@ -72,8 +72,8 @@ agent:
   value_loss_scale: 2.5
   discriminator_loss_scale: 6.0
   amp_batch_size: 512
-  task_reward_scale: 1.0
-  style_reward_scale: 2.0
+  task_reward_scale: 0.5
+  style_reward_scale: 1.0
   discriminator_batch_size: 4096
   discriminator_logit_regularization_scale: 0.05
   discriminator_gradient_penalty_scale: 5.0

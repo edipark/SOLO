@@ -9,12 +9,19 @@ import torch
 import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation
 from isaaclab.envs import DirectRLEnv
+from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 from isaaclab.utils.math import quat_apply
 
 from .g1_amp_env_cfg import G1AmpEnvCfg
 from .motions.motion_loader import MotionLoader
 from .schema import G1_JOINT_NAMES, G1_KEY_BODY_NAMES
-from .task_math import compose_task_reward, normalized_saturation_huber, reference_history_times
+from .task_math import (
+    compose_task_reward,
+    normalized_action_to_position,
+    normalized_saturation_huber,
+    reference_history_times,
+    soft_limit_action_parameters,
+)
 
 
 class G1AmpEnv(DirectRLEnv):
@@ -22,16 +29,24 @@ class G1AmpEnv(DirectRLEnv):
 
     def __init__(self, cfg: G1AmpEnvCfg, render_mode: str | None = None, **kwargs):
         super().__init__(cfg, render_mode, **kwargs)
-        lower = self.robot.data.soft_joint_pos_limits[0, :, 0]
-        upper = self.robot.data.soft_joint_pos_limits[0, :, 1]
-        self.action_offset = 0.5 * (upper + lower)
-        self.action_scale = 0.5 * (upper - lower)
+        self.action_offset, self.action_scale = soft_limit_action_parameters(
+            self.robot.data.soft_joint_pos_limits[0]
+        )
         self.actions = torch.zeros((self.num_envs, 29), device=self.device)
         self.previous_actions = torch.zeros_like(self.actions)
 
-        self._motion_loader = MotionLoader(self.cfg.motion_file, self.device, expected_dof_names=G1_JOINT_NAMES)
+        self._motion_loader = MotionLoader(
+            self.cfg.motion_file,
+            self.device,
+            expected_dof_names=G1_JOINT_NAMES,
+            speed_scale=self.cfg.motion_speed_scale,
+        )
         self.ref_body_index = self.robot.data.body_names.index(self.cfg.reference_body)
         self.key_body_indexes = [self.robot.data.body_names.index(name) for name in G1_KEY_BODY_NAMES]
+        self.foot_body_indexes = [
+            self.robot.data.body_names.index(name)
+            for name in ("left_ankle_roll_link", "right_ankle_roll_link")
+        ]
         self.motion_dof_indexes = self._motion_loader.get_dof_index(self.robot.data.joint_names)
         self.motion_ref_body_index = self._motion_loader.get_body_index([self.cfg.reference_body])[0]
         self.motion_key_body_indexes = self._motion_loader.get_body_index(G1_KEY_BODY_NAMES)
@@ -42,17 +57,30 @@ class G1AmpEnv(DirectRLEnv):
             (self.num_envs, self.cfg.num_amp_observations, self.cfg.amp_observation_space), device=self.device
         )
 
+        self._vel_window_buf = torch.full(
+            (self.num_envs, self.cfg.vel_window_steps), 1.0e3, device=self.device
+        )
+        self._vel_window_count = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+
+        self._episode_stats_capacity = self.num_envs
+        self._episode_stats_count = 0
+        self._episode_stats_write_index = 0
+        self._completed_episode_lengths = torch.zeros(self.num_envs, device=self.device)
+        self._completed_episode_timeouts = torch.zeros(self.num_envs, device=self.device)
+
     def _setup_scene(self):
         self.robot = Articulation(self.cfg.robot)
-        ground_cfg = sim_utils.CuboidCfg(
-            size=(200.0, 200.0, 0.1),
-            collision_props=sim_utils.CollisionPropertiesCfg(),
-            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.15, 0.15, 0.15)),
-            physics_material=sim_utils.RigidBodyMaterialCfg(
-                static_friction=1.0, dynamic_friction=1.0, restitution=0.0
+        spawn_ground_plane(
+            prim_path="/World/ground",
+            cfg=GroundPlaneCfg(
+                physics_material=sim_utils.RigidBodyMaterialCfg(
+                    friction_combine_mode="max",
+                    static_friction=1.0,
+                    dynamic_friction=1.0,
+                    restitution=0.0,
+                )
             ),
         )
-        ground_cfg.func("/World/ground", ground_cfg, translation=(0.0, 0.0, -0.05))
         self.scene.clone_environments(copy_from_source=False)
         if self.device == "cpu":
             self.scene.filter_collisions(global_prim_paths=["/World/ground"])
@@ -65,7 +93,9 @@ class G1AmpEnv(DirectRLEnv):
         self.actions = actions.clone()
 
     def _apply_action(self):
-        self.robot.set_joint_position_target(self.action_offset + self.action_scale * self.actions)
+        self.robot.set_joint_position_target(
+            normalized_action_to_position(self.actions, self.action_offset, self.action_scale)
+        )
 
     def _current_amp_observation(self) -> torch.Tensor:
         return compute_amp_observation(
@@ -80,7 +110,7 @@ class G1AmpEnv(DirectRLEnv):
 
     def get_estimator_target(self) -> torch.Tensor:
         obs = self._current_amp_observation()
-        return torch.cat((obs[:, 65:71], obs[:, 62:65]), dim=-1)
+        return obs[:, 58:]
 
     def get_estimator_joint_state(self) -> tuple[torch.Tensor, torch.Tensor, tuple[str, ...]]:
         return self.robot.data.joint_pos, self.robot.data.joint_vel, tuple(self.robot.data.joint_names)
@@ -104,9 +134,15 @@ class G1AmpEnv(DirectRLEnv):
         height_reward = torch.exp(-((height - self.cfg.nominal_height) / self.cfg.height_sigma).square())
         vx = self.robot.data.body_lin_vel_w[:, self.ref_body_index, 0]
         if self.cfg.task_kind == "walk":
-            velocity = torch.exp(-self.cfg.velocity_tracking_coeff * (vx - self.cfg.target_velocity).square())
+            target_velocity = self.cfg.target_velocity * self.cfg.motion_speed_scale
+            velocity = torch.exp(-self.cfg.velocity_tracking_coeff * (vx - target_velocity).square())
         else:
             velocity = torch.zeros_like(vx)
+        foot_quat = self.robot.data.body_quat_w[:, self.foot_body_indexes]
+        local_z = torch.zeros((self.num_envs, len(self.foot_body_indexes), 3), device=self.device)
+        local_z[..., 2] = 1.0
+        foot_dot_z = quat_apply(foot_quat, local_z)[..., 2].clamp(-1.0, 1.0)
+        foot_flat = torch.exp(-self.cfg.foot_flat_coeff * (1.0 - foot_dot_z).square()).mean(dim=-1)
         action_rate = (self.actions - self.previous_actions).square().mean(dim=-1)
         effort_limits = self.robot.data.joint_effort_limits
         saturation = normalized_saturation_huber(self.robot.data.computed_torque, effort_limits)
@@ -122,13 +158,16 @@ class G1AmpEnv(DirectRLEnv):
             action_rate_weight=self.cfg.action_rate_penalty,
             saturation_weight=self.cfg.saturation_penalty,
         )
+        raw_task = raw_task + self.cfg.foot_flat_reward_weight * foot_flat
         saturation_fraction = (self.robot.data.computed_torque.abs() >= effort_limits - 1.0e-5).float().mean(dim=-1)
+        previous_log = self.extras.get("log", {}) if isinstance(self.extras.get("log"), dict) else {}
         self.extras["log"] = {
+            **previous_log,
             "reward/raw_task": raw_task.mean().detach(),
-            "reward/scaled_task": raw_task.mean().detach(),
             "reward/velocity_tracking": velocity.mean().detach(),
             "reward/upright": upright.mean().detach(),
             "reward/height": height_reward.mean().detach(),
+            "reward/foot_flat": foot_flat.mean().detach(),
             "penalty/action_rate": action_rate.mean().detach(),
             "penalty/action_rate_weighted": (self.cfg.action_rate_penalty * action_rate.mean()).detach(),
             "penalty/saturation": saturation.mean().detach(),
@@ -143,16 +182,79 @@ class G1AmpEnv(DirectRLEnv):
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         time_out = self.episode_length_buf >= self.max_episode_length - 1
         if self.cfg.early_termination:
-            died = self.robot.data.body_pos_w[:, self.ref_body_index, 2] < self.cfg.termination_height
+            too_low = self.robot.data.body_pos_w[:, self.ref_body_index, 2] < self.cfg.termination_height
+            vx = self.robot.data.body_lin_vel_w[:, self.ref_body_index, 0]
+            too_slow_instant = (
+                vx < self.cfg.termination_min_vel_x
+                if self.cfg.termination_min_vel_x > 0.0
+                else torch.zeros_like(too_low)
+            )
+            if self.cfg.vel_window_min_vx > 0.0:
+                write_index = self.episode_length_buf % self.cfg.vel_window_steps
+                env_index = torch.arange(self.num_envs, device=self.device)
+                self._vel_window_buf[env_index, write_index] = vx
+                self._vel_window_count = torch.clamp(self._vel_window_count + 1, max=self.cfg.vel_window_steps)
+                window_full = self._vel_window_count >= self.cfg.vel_window_steps
+                too_slow_window = window_full & (self._vel_window_buf.mean(dim=1) < self.cfg.vel_window_min_vx)
+            else:
+                too_slow_window = torch.zeros_like(too_low)
+            died = too_low | too_slow_instant | too_slow_window
         else:
             died = torch.zeros_like(time_out)
+        log = self.extras.setdefault("log", {})
+        log["episode/deaths"] = died.sum().float().detach()
+        log["episode/timeouts"] = (time_out & ~died).sum().float().detach()
+        self._log_completed_episode_metrics(died, time_out, log)
         return died, time_out
+
+    def _log_completed_episode_metrics(
+        self, died: torch.Tensor, time_out: torch.Tensor, log: dict[str, torch.Tensor]
+    ) -> None:
+        completed_ids = (died | time_out).nonzero(as_tuple=False).squeeze(-1)
+        num_completed = completed_ids.numel()
+        if num_completed:
+            lengths = self.episode_length_buf[completed_ids].float()
+            timeouts = (time_out[completed_ids] & ~died[completed_ids]).float()
+            capacity = self._episode_stats_capacity
+            if num_completed >= capacity:
+                self._completed_episode_lengths[:] = lengths[-capacity:]
+                self._completed_episode_timeouts[:] = timeouts[-capacity:]
+                self._episode_stats_write_index = 0
+                self._episode_stats_count = capacity
+            else:
+                start = self._episode_stats_write_index
+                first = min(num_completed, capacity - start)
+                self._completed_episode_lengths[start : start + first] = lengths[:first]
+                self._completed_episode_timeouts[start : start + first] = timeouts[:first]
+                remaining = num_completed - first
+                if remaining:
+                    self._completed_episode_lengths[:remaining] = lengths[first:]
+                    self._completed_episode_timeouts[:remaining] = timeouts[first:]
+                self._episode_stats_write_index = (start + num_completed) % capacity
+                self._episode_stats_count = min(capacity, self._episode_stats_count + num_completed)
+
+        if not self._episode_stats_count:
+            return
+        values = slice(None) if self._episode_stats_count == self._episode_stats_capacity else slice(
+            0, self._episode_stats_count
+        )
+        mean_length = self._completed_episode_lengths[values].mean()
+        timeout_fraction = self._completed_episode_timeouts[values].mean()
+        log["episode/mean_length"] = mean_length.detach()
+        log["episode/mean_length_s"] = (mean_length * self.step_dt).detach()
+        log["episode/timeout_fraction"] = timeout_fraction.detach()
+        log["episode/death_fraction"] = (1.0 - timeout_fraction).detach()
+        log["episode/stats_window_count"] = torch.tensor(
+            self._episode_stats_count, dtype=torch.float32, device=self.device
+        )
 
     def _reset_idx(self, env_ids: torch.Tensor | None):
         if env_ids is None or len(env_ids) == self.num_envs:
             env_ids = self.robot._ALL_INDICES
         self.robot.reset(env_ids)
         super()._reset_idx(env_ids)
+        self._vel_window_buf[env_ids] = 1.0e3
+        self._vel_window_count[env_ids] = 0
         if self.cfg.reset_strategy == "default":
             root_state = self.robot.data.default_root_state[env_ids].clone()
             root_state[:, :3] += self.scene.env_origins[env_ids]

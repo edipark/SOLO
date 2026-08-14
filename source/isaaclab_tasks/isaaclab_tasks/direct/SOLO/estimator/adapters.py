@@ -9,6 +9,7 @@ import torch
 
 from ..schema import AMP_OBSERVATION_SCHEMA, PPO_OBSERVATION_SCHEMA, ObservationSchema, joint_indices
 from ..skrl_compat import deterministic_action
+from ..task_math import inject_observation_estimate
 
 
 def unwrap_direct_env(env):
@@ -56,9 +57,7 @@ class PolicyAdapter(ABC):
     def inject_estimate(self, observations: torch.Tensor, estimate: torch.Tensor) -> torch.Tensor:
         if estimate.shape[-1] != self.schema.estimator_target_dim:
             raise ValueError("Estimator output does not match the policy schema")
-        result = observations.clone()
-        result[:, list(self.schema.estimator_target_indices)] = estimate
-        return result
+        return inject_observation_estimate(observations, estimate, self.schema.estimator_target_indices)
 
     @abstractmethod
     def name(self) -> str:

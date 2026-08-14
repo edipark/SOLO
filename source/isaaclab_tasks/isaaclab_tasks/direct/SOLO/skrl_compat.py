@@ -35,7 +35,7 @@ def require_skrl_2() -> str:
     if not MIN_SKRL <= current < MAX_SKRL:
         raise RuntimeError(
             f"Unsupported skrl version {current}. SOLO G1 supports skrl>=2.0,<3.0; "
-            "SKRL 1.x checkpoints must be converted explicitly with tools/convert_legacy_checkpoint.py."
+            "SKRL 1.x checkpoints are not supported by the Dextra-aligned pipeline."
         )
     return str(current)
 
@@ -65,7 +65,7 @@ def deterministic_action(agent, observations, states=None):
     return outputs[-1].get("mean_actions", outputs[0])
 
 
-def scaled_reward(raw_task, raw_style, task_scale: float = 1.0, style_scale: float = 2.0):
+def scaled_reward(raw_task, raw_style, task_scale: float = 0.5, style_scale: float = 1.0):
     """Return scaled components and their effective sum for logging/tests."""
     task = raw_task * task_scale
     style = raw_style * style_scale

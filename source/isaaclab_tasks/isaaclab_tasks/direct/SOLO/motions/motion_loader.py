@@ -19,6 +19,7 @@ class MotionLoader:
         motion_file: str,
         device: torch.device,
         expected_dof_names: tuple[str, ...] | list[str] | None = None,
+        speed_scale: float = 1.0,
     ) -> None:
         """Load a motion file and initialize the internal variables.
 
@@ -30,6 +31,8 @@ class MotionLoader:
             AssertionError: If the specified motion file doesn't exist.
         """
         assert os.path.isfile(motion_file), f"Invalid file path: {motion_file}"
+        if speed_scale <= 0.0:
+            raise ValueError(f"Motion speed_scale must be positive, got {speed_scale}")
         data = np.load(motion_file)
 
         self.device = device
@@ -53,9 +56,13 @@ class MotionLoader:
             data["body_angular_velocities"], dtype=torch.float32, device=self.device
         )
 
-        self.dt = 1.0 / data["fps"]
+        self.speed_scale = float(speed_scale)
+        self.dt = 1.0 / (float(data["fps"]) * self.speed_scale)
         self.num_frames = self.dof_positions.shape[0]
         self.duration = self.dt * (self.num_frames - 1)
+        self.dof_velocities.mul_(self.speed_scale)
+        self.body_linear_velocities.mul_(self.speed_scale)
+        self.body_angular_velocities.mul_(self.speed_scale)
         print(f"Motion loaded ({motion_file}): duration: {self.duration} sec, frames: {self.num_frames}")
 
     @property

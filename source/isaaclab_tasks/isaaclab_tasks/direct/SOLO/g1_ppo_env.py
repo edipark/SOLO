@@ -60,7 +60,9 @@ class G1PpoWalkEnv(G1AmpEnv):
         action_rate = (self.actions - self.previous_actions).square().mean(dim=-1)
         torque = self.robot.data.applied_torque.square().mean(dim=-1)
         reward = tracking + 0.25 * upright - 0.01 * action_rate - 1.0e-6 * torque
+        previous_log = self.extras.get("log", {}) if isinstance(self.extras.get("log"), dict) else {}
         self.extras["log"] = {
+            **previous_log,
             "reward/raw_task": reward.mean().detach(),
             "reward/velocity_tracking": tracking.mean().detach(),
             "reward/upright": upright.mean().detach(),

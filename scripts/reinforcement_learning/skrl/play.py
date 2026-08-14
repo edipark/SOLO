@@ -59,6 +59,10 @@ parser.add_argument(
     ),
 )
 parser.add_argument("--real-time", action="store_true", default=False, help="Run in real-time, if possible.")
+parser.add_argument("--print-base-velocity", action="store_true", help="Print world-frame base velocity.")
+parser.add_argument("--print-base-velocity-interval", type=int, default=30)
+parser.add_argument("--print-base-velocity-env", type=int, default=0)
+parser.add_argument("--print-base-angular", action="store_true", help="Also print base angular velocity.")
 
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
@@ -114,6 +118,12 @@ from isaaclab_rl.utils.pretrained_checkpoint import get_published_pretrained_che
 import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils import get_checkpoint_path
 from isaaclab_tasks.utils.hydra import hydra_task_config
+
+try:
+    from isaaclab_tasks.direct.SOLO.tools.rollout_diagnostics import RolloutDiagnostics, unwrap_env_with_robot
+except ImportError:
+    RolloutDiagnostics = None
+    unwrap_env_with_robot = None
 
 # PLACEHOLDER: Extension template (do not remove this comment)
 
@@ -196,6 +206,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, expe
         print_dict(video_kwargs, nesting=4)
         env = gym.wrappers.RecordVideo(env, **video_kwargs)
 
+    env_before_skrl = env
+
     # wrap around environment for skrl
     env = SkrlVecEnvWrapper(env, ml_framework=args_cli.ml_framework)  # same as: `wrap_env(env, wrapper="auto")`
 
@@ -211,10 +223,21 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, expe
     # set agent to evaluation mode
     runner.agent.enable_training_mode(False, apply_to_models=True)
 
+    core = unwrap_env_with_robot(env_before_skrl) if unwrap_env_with_robot is not None else None
+    diagnostics = None
+    if args_cli.video and core is not None and RolloutDiagnostics is not None:
+        try:
+            diagnostics = RolloutDiagnostics(core, env_index=0, max_steps=args_cli.video_length)
+        except ValueError as error:
+            print(f"[WARN] Rollout diagnostics disabled: {error}")
+    elif args_cli.video:
+        print("[WARN] Rollout diagnostics unavailable for this environment")
+
     # reset environment
     obs, _ = env.reset()
     states = env.state()
     timestep = 0
+    play_step = 0
     # simulate environment
     while simulation_app.is_running():
         start_time = time.time()
@@ -232,6 +255,26 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, expe
             # env stepping
             obs, _, _, _, _ = env.step(actions)
             states = env.state()
+        play_step += 1
+        if diagnostics is not None and torch.is_tensor(actions):
+            diagnostics.record(actions)
+        if args_cli.print_base_velocity and core is not None:
+            interval = max(1, args_cli.print_base_velocity_interval)
+            if play_step % interval == 0:
+                env_index = min(max(args_cli.print_base_velocity_env, 0), core.num_envs - 1)
+                linear = core.robot.data.body_lin_vel_w[env_index, core.ref_body_index]
+                message = (
+                    f"[base velocity] step={play_step} env={env_index} "
+                    f"linear=({float(linear[0]):+.4f}, {float(linear[1]):+.4f}, "
+                    f"{float(linear[2]):+.4f}) m/s"
+                )
+                if args_cli.print_base_angular:
+                    angular = core.robot.data.body_ang_vel_w[env_index, core.ref_body_index]
+                    message += (
+                        f" angular=({float(angular[0]):+.4f}, {float(angular[1]):+.4f}, "
+                        f"{float(angular[2]):+.4f}) rad/s"
+                    )
+                print(message, flush=True)
         if args_cli.video:
             timestep += 1
             # exit the play loop after recording one video
@@ -242,6 +285,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, expe
         sleep_time = dt - (time.time() - start_time)
         if args_cli.real_time and sleep_time > 0:
             time.sleep(sleep_time)
+
+    if diagnostics is not None:
+        artifacts = diagnostics.save(os.path.join(log_dir, "videos", "play"), dt)
+        if artifacts:
+            print(f"[INFO] Rollout diagnostics: {artifacts}")
 
     # close the simulator
     env.close()

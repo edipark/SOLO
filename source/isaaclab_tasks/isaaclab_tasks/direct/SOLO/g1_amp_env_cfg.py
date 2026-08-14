@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from dataclasses import MISSING
 
-from isaaclab.envs import DirectRLEnvCfg
+from isaaclab.envs import DirectRLEnvCfg, ViewerCfg
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim import PhysxCfg, SimulationCfg
 from isaaclab.utils import configclass
@@ -28,8 +28,12 @@ class G1AmpEnvCfg(DirectRLEnvCfg):
     amp_observation_space = 101
 
     early_termination = True
-    termination_height = 0.48
+    termination_height = 0.5
+    termination_min_vel_x = 0.0
+    vel_window_min_vx = 0.01
+    vel_window_steps = 10
     motion_file: str = MISSING
+    motion_speed_scale = 1.0
     reference_body = "pelvis"
     reset_strategy = "random"
     task_kind = "walk"
@@ -42,7 +46,17 @@ class G1AmpEnvCfg(DirectRLEnvCfg):
     height_weight = 0.0
     velocity_weight = 0.5
     action_rate_penalty = 0.05
-    saturation_penalty = 0.0
+    foot_flat_reward_weight = 0.0
+    foot_flat_coeff = 10.0
+    saturation_penalty = 0.05
+
+    viewer: ViewerCfg = ViewerCfg(
+        eye=(3.0, 3.0, 2.0),
+        lookat=(0.0, 0.0, 0.8),
+        resolution=(1280, 720),
+        origin_type="env",
+        env_index=0,
+    )
 
     sim: SimulationCfg = SimulationCfg(
         dt=PHYSICS_DT,
@@ -62,6 +76,7 @@ class G1AmpWalkEnvCfg(G1AmpEnvCfg):
 @configclass
 class G1AmpDanceEnvCfg(G1AmpEnvCfg):
     motion_file = os.path.join(MOTIONS_DIR, "G1_dance.npz")
+    reset_strategy = "default"
     task_kind = "dance"
     velocity_weight = 0.0
     upright_weight = 0.325

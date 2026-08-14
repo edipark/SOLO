@@ -41,7 +41,8 @@ def _extract_metrics(training_json: Path) -> dict:
     source = data.get("metrics", data)
     metrics = {
         key: value for key, value in source.items()
-        if isinstance(value, (int, float)) or key in ("target_mae", "target_rmse", "trace_target", "trace_prediction", "rounds")
+        if isinstance(value, (int, float))
+        or key in ("target_mae", "target_rmse", "target_names", "trace_target", "trace_prediction", "rounds")
     }
     rounds = data.get("rounds", [])
     if rounds:
@@ -74,7 +75,7 @@ def main():
         for seed in args.seeds:
             matrix.append((task_key, seed, "TeacherGT", "TEACHER", 1, "all", 0))
             matrix.extend((task_key, seed, *experiment) for experiment in EXPERIMENTS)
-            matrix.extend(((task_key, seed, "VanillaStudent_all", "STUDENT", 1, "all", 0), (task_key, seed, "StudentDAgger_all", "STUDENT", 1, "all", 10)))
+            matrix.append((task_key, seed, "StudentDAgger_all", "STUDENT", 1, "all", 300))
     if args.fast:
         args.collect_steps, args.epochs = 100, 2
         matrix = matrix[: min(len(matrix), 6)]
@@ -90,12 +91,46 @@ def main():
             script = Path(__file__).with_name("evaluate_teacher.py")
             command = [sys.executable, str(script), "--teacher-checkpoint", checkpoints[task_key], "--task", task, "--agent", agent_key, "--adapter", adapter]
         elif model == "STUDENT":
-            script = Path(__file__).with_name("train_distillation.py")
-            command = [sys.executable, str(script), "--teacher-checkpoint", checkpoints[task_key], "--task", task, "--agent", agent_key, "--adapter", adapter, "--dagger-rounds", str(dagger)]
+            script = Path(__file__).with_name("train_dagger.py")
+            student_output = run_output / f"{task}_StudentDAgger_seed{seed}"
+            command = [
+                sys.executable,
+                str(script),
+                "--teacher-checkpoint",
+                checkpoints[task_key],
+                "--task",
+                task,
+                "--agent",
+                agent_key,
+                "--adapter",
+                adapter,
+                "--num-iterations",
+                str(dagger),
+                "--rollout-steps",
+                str(args.collect_steps),
+                "--num-envs",
+                str(args.num_envs),
+                "--seed",
+                str(seed),
+                "--log-dir",
+                str(student_output),
+            ]
         else:
             script = Path(__file__).with_name("train_state_estimator.py")
             command = [sys.executable, str(script), "--teacher-checkpoint", checkpoints[task_key], "--task", task, "--agent", agent_key, "--adapter", adapter, "--estimator", model, "--window", str(window), "--joint-preset", preset, "--dagger-rounds", str(dagger)]
-        command += ["--seed", str(seed), "--num-envs", str(args.num_envs), "--collect-steps", str(args.collect_steps), "--epochs", str(args.epochs), "--output-dir", str(run_output)]
+        if model != "STUDENT":
+            command += [
+                "--seed",
+                str(seed),
+                "--num-envs",
+                str(args.num_envs),
+                "--collect-steps",
+                str(args.collect_steps),
+                "--epochs",
+                str(args.epochs),
+                "--output-dir",
+                str(run_output),
+            ]
         if args.headless:
             command.append("--headless")
         elapsed = time.monotonic() - start_all
