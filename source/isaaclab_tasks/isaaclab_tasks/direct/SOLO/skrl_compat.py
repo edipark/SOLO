@@ -1,0 +1,103 @@
+"""SKRL 2.x version/config/checkpoint compatibility helpers."""
+
+from __future__ import annotations
+
+from importlib.metadata import PackageNotFoundError, version
+from typing import Mapping, MutableMapping
+
+from packaging.version import Version
+
+
+MIN_SKRL = Version("2.0.0")
+MAX_SKRL = Version("3.0.0")
+
+OBSOLETE_KEYS = {
+    "amp_state_preprocessor": "amp_observation_preprocessor",
+    "amp_state_preprocessor_kwargs": "amp_observation_preprocessor_kwargs",
+    "task_reward_weight": "task_reward_scale",
+    "style_reward_weight": "style_reward_scale",
+    "discriminator_reward_scale": "style_reward_scale (fold the old discriminator scale into this value)",
+    "lambda": "gae_lambda",
+    "clip_predicted_values": "remove it; value_clip controls value clipping in SKRL 2.x",
+    "rewards_shaper_scale": "remove it or provide the SKRL 2.x rewards_shaper callable",
+}
+
+
+def installed_skrl_version() -> Version:
+    try:
+        return Version(version("skrl"))
+    except PackageNotFoundError as exc:
+        raise RuntimeError("skrl is not installed; install 'skrl>=2.0,<3.0'") from exc
+
+
+def require_skrl_2() -> str:
+    current = installed_skrl_version()
+    if not MIN_SKRL <= current < MAX_SKRL:
+        raise RuntimeError(
+            f"Unsupported skrl version {current}. SOLO G1 supports skrl>=2.0,<3.0; "
+            "SKRL 1.x checkpoints must be converted explicitly with tools/convert_legacy_checkpoint.py."
+        )
+    return str(current)
+
+
+def validate_skrl_config(config: Mapping) -> None:
+    """Fail before simulator startup when a legacy agent key is present."""
+    agent = config.get("agent", config)
+    found = {key: replacement for key, replacement in OBSOLETE_KEYS.items() if key in agent}
+    if found:
+        hints = "; ".join(f"{key!r} -> {replacement}" for key, replacement in found.items())
+        raise ValueError(f"Obsolete SKRL 1.x configuration key(s): {hints}")
+    if agent.get("class") == "AMP":
+        for required in ("observation_preprocessor", "amp_observation_preprocessor", "task_reward_scale", "style_reward_scale"):
+            if required not in agent:
+                raise ValueError(f"SKRL 2.x AMP config is missing {required!r}")
+
+
+def prepare_runner_config(config: MutableMapping) -> MutableMapping:
+    require_skrl_2()
+    validate_skrl_config(config)
+    return config
+
+
+def deterministic_action(agent, observations, states=None):
+    """Use only the public SKRL 2.x inference API."""
+    outputs = agent.act(observations, states, timestep=0, timesteps=0)
+    return outputs[-1].get("mean_actions", outputs[0])
+
+
+def scaled_reward(raw_task, raw_style, task_scale: float = 1.0, style_scale: float = 2.0):
+    """Return scaled components and their effective sum for logging/tests."""
+    task = raw_task * task_scale
+    style = raw_style * style_scale
+    return task, style, task + style
+
+
+def amp_reward_components(agent, amp_observations, raw_task):
+    """Compute the SKRL 2.x AMP reward decomposition from a loaded agent.
+
+    The agent remains responsible for checkpoint loading. This helper only uses
+    the live AMP model/preprocessor so no serialized module key is assumed.
+    """
+    if not hasattr(agent, "discriminator") or not hasattr(agent, "_amp_observation_preprocessor"):
+        return None
+    import torch
+
+    with torch.no_grad():
+        logits, _ = agent.discriminator.act(
+            {"observations": agent._amp_observation_preprocessor(amp_observations)}, role="discriminator"
+        )
+        raw_style = -torch.log(
+            torch.maximum(1.0 - torch.sigmoid(logits), torch.tensor(1.0e-4, device=logits.device))
+        ).view(raw_task.shape)
+    task_scale = float(agent.cfg.task_reward_scale)
+    style_scale = float(agent.cfg.style_reward_scale)
+    scaled_task, scaled_style, total = scaled_reward(raw_task, raw_style, task_scale, style_scale)
+    return {
+        "raw_task": raw_task,
+        "raw_style": raw_style,
+        "scaled_task": scaled_task,
+        "scaled_style": scaled_style,
+        "effective_reward": total,
+        "task_reward_scale": task_scale,
+        "style_reward_scale": style_scale,
+    }
