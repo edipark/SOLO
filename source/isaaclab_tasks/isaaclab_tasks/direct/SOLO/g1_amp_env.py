@@ -1,4 +1,4 @@
-"""29-DOF Unitree G1 AMP environment with walk/dance task rewards."""
+"""29-DOF Unitree G1 environment trained from an adversarial motion prior."""
 
 from __future__ import annotations
 
@@ -16,9 +16,7 @@ from .g1_amp_env_cfg import G1AmpEnvCfg
 from .motions.motion_loader import MotionLoader
 from .schema import G1_JOINT_NAMES, G1_KEY_BODY_NAMES
 from .task_math import (
-    compose_task_reward,
     normalized_action_to_position,
-    normalized_saturation_huber,
     reference_history_times,
     soft_limit_action_parameters,
 )
@@ -43,10 +41,6 @@ class G1AmpEnv(DirectRLEnv):
         )
         self.ref_body_index = self.robot.data.body_names.index(self.cfg.reference_body)
         self.key_body_indexes = [self.robot.data.body_names.index(name) for name in G1_KEY_BODY_NAMES]
-        self.foot_body_indexes = [
-            self.robot.data.body_names.index(name)
-            for name in ("left_ankle_roll_link", "right_ankle_roll_link")
-        ]
         self.motion_dof_indexes = self._motion_loader.get_dof_index(self.robot.data.joint_names)
         self.motion_ref_body_index = self._motion_loader.get_body_index([self.cfg.reference_body])[0]
         self.motion_key_body_indexes = self._motion_loader.get_body_index(G1_KEY_BODY_NAMES)
@@ -127,51 +121,19 @@ class G1AmpEnv(DirectRLEnv):
         return {"policy": obs}
 
     def _get_rewards(self) -> torch.Tensor:
+        # Match linden713/humanoid_amp: the environment contributes no
+        # hand-crafted reward. SKRL supplies the discriminator style reward.
+        raw_task = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
         height = self.robot.data.body_pos_w[:, self.ref_body_index, 2]
-        root_quat = self.robot.data.body_quat_w[:, self.ref_body_index]
-        up = quaternion_to_tangent_and_normal(root_quat)[:, 5].clamp(-1.0, 1.0)
-        upright = torch.exp(-4.0 * (1.0 - up).square())
-        height_reward = torch.exp(-((height - self.cfg.nominal_height) / self.cfg.height_sigma).square())
         vx = self.robot.data.body_lin_vel_w[:, self.ref_body_index, 0]
-        if self.cfg.task_kind == "walk":
-            target_velocity = self.cfg.target_velocity * self.cfg.motion_speed_scale
-            velocity = torch.exp(-self.cfg.velocity_tracking_coeff * (vx - target_velocity).square())
-        else:
-            velocity = torch.zeros_like(vx)
-        foot_quat = self.robot.data.body_quat_w[:, self.foot_body_indexes]
-        local_z = torch.zeros((self.num_envs, len(self.foot_body_indexes), 3), device=self.device)
-        local_z[..., 2] = 1.0
-        foot_dot_z = quat_apply(foot_quat, local_z)[..., 2].clamp(-1.0, 1.0)
-        foot_flat = torch.exp(-self.cfg.foot_flat_coeff * (1.0 - foot_dot_z).square()).mean(dim=-1)
         action_rate = (self.actions - self.previous_actions).square().mean(dim=-1)
         effort_limits = self.robot.data.joint_effort_limits
-        saturation = normalized_saturation_huber(self.robot.data.computed_torque, effort_limits)
-        raw_task = compose_task_reward(
-            velocity,
-            upright,
-            height_reward,
-            action_rate,
-            saturation,
-            velocity_weight=self.cfg.velocity_weight,
-            upright_weight=self.cfg.upright_weight,
-            height_weight=self.cfg.height_weight,
-            action_rate_weight=self.cfg.action_rate_penalty,
-            saturation_weight=self.cfg.saturation_penalty,
-        )
-        raw_task = raw_task + self.cfg.foot_flat_reward_weight * foot_flat
         saturation_fraction = (self.robot.data.computed_torque.abs() >= effort_limits - 1.0e-5).float().mean(dim=-1)
         previous_log = self.extras.get("log", {}) if isinstance(self.extras.get("log"), dict) else {}
         self.extras["log"] = {
             **previous_log,
             "reward/raw_task": raw_task.mean().detach(),
-            "reward/velocity_tracking": velocity.mean().detach(),
-            "reward/upright": upright.mean().detach(),
-            "reward/height": height_reward.mean().detach(),
-            "reward/foot_flat": foot_flat.mean().detach(),
-            "penalty/action_rate": action_rate.mean().detach(),
-            "penalty/action_rate_weighted": (self.cfg.action_rate_penalty * action_rate.mean()).detach(),
-            "penalty/saturation": saturation.mean().detach(),
-            "penalty/saturation_weighted": (self.cfg.saturation_penalty * saturation.mean()).detach(),
+            "metric/action_rate": action_rate.mean().detach(),
             "metric/base_vel_x": vx.mean().detach(),
             "metric/base_height": height.mean().detach(),
             "metric/joint_velocity_squared": self.robot.data.joint_vel.square().mean().detach(),

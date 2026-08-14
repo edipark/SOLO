@@ -64,7 +64,6 @@ The following modules are available in the ``isaaclab_mimic`` extension:
    :toctree: lab_mimic
 
    datagen
-   envs
 
 isaaclab_contrib extension
 -----------------------------

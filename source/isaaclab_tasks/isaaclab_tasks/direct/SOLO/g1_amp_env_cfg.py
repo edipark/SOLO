@@ -5,13 +5,13 @@ from __future__ import annotations
 import os
 from dataclasses import MISSING
 
-from isaaclab.envs import DirectRLEnvCfg, ViewerCfg
+from isaaclab.envs import DirectRLEnvCfg
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim import PhysxCfg, SimulationCfg
 from isaaclab.utils import configclass
 
 from .g1_robot_cfg import G1_SOLO_CFG
-from .task_math import AMP_HISTORY_STEPS, CONTROL_DECIMATION, EPISODE_LENGTH_S, PHYSICS_DT, WALK_TARGET_VELOCITY
+from .task_math import AMP_HISTORY_STEPS, CONTROL_DECIMATION, EPISODE_LENGTH_S, PHYSICS_DT
 
 
 MOTIONS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "motions")
@@ -28,35 +28,14 @@ class G1AmpEnvCfg(DirectRLEnvCfg):
     amp_observation_space = 101
 
     early_termination = True
-    termination_height = 0.5
+    termination_height = 0.55
     termination_min_vel_x = 0.0
-    vel_window_min_vx = 0.01
+    vel_window_min_vx = 0.0
     vel_window_steps = 10
     motion_file: str = MISSING
     motion_speed_scale = 1.0
     reference_body = "pelvis"
     reset_strategy = "random"
-    task_kind = "walk"
-
-    target_velocity = WALK_TARGET_VELOCITY
-    velocity_tracking_coeff = 2.0
-    nominal_height = 0.78
-    height_sigma = 0.08
-    upright_weight = 0.0
-    height_weight = 0.0
-    velocity_weight = 0.5
-    action_rate_penalty = 0.05
-    foot_flat_reward_weight = 0.0
-    foot_flat_coeff = 10.0
-    saturation_penalty = 0.05
-
-    viewer: ViewerCfg = ViewerCfg(
-        eye=(3.0, 3.0, 2.0),
-        lookat=(0.0, 0.0, 0.8),
-        resolution=(1280, 720),
-        origin_type="env",
-        env_index=0,
-    )
 
     sim: SimulationCfg = SimulationCfg(
         dt=PHYSICS_DT,
@@ -70,14 +49,9 @@ class G1AmpEnvCfg(DirectRLEnvCfg):
 @configclass
 class G1AmpWalkEnvCfg(G1AmpEnvCfg):
     motion_file = os.path.join(MOTIONS_DIR, "G1_walk.npz")
-    task_kind = "walk"
 
 
 @configclass
 class G1AmpDanceEnvCfg(G1AmpEnvCfg):
     motion_file = os.path.join(MOTIONS_DIR, "G1_dance.npz")
     reset_strategy = "default"
-    task_kind = "dance"
-    velocity_weight = 0.0
-    upright_weight = 0.325
-    height_weight = 0.175

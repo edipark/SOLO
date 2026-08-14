@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from importlib.metadata import PackageNotFoundError, version
+from types import MethodType
 from typing import Mapping, MutableMapping
 
 from packaging.version import Version
@@ -65,7 +66,7 @@ def deterministic_action(agent, observations, states=None):
     return outputs[-1].get("mean_actions", outputs[0])
 
 
-def scaled_reward(raw_task, raw_style, task_scale: float = 0.5, style_scale: float = 1.0):
+def scaled_reward(raw_task, raw_style, task_scale: float = 0.0, style_scale: float = 2.0):
     """Return scaled components and their effective sum for logging/tests."""
     task = raw_task * task_scale
     style = raw_style * style_scale
@@ -101,3 +102,58 @@ def amp_reward_components(agent, amp_observations, raw_task):
         "task_reward_scale": task_scale,
         "style_reward_scale": style_scale,
     }
+
+
+def install_amp_reward_tracking(agent) -> bool:
+    """Track AMP's effective reward instead of the raw environment reward.
+
+    SKRL 2.x computes the discriminator reward only in ``AMP.update``. Its base
+    ``Agent.record_transition`` therefore accumulates the environment reward,
+    which is identically zero for pure AMP, for TensorBoard and best-checkpoint
+    selection. This instance-level adapter keeps the original raw reward in the
+    rollout memory, but feeds the effective task + style reward to SKRL's
+    statistics accumulator.
+
+    Returns ``True`` when the adapter was installed and ``False`` for non-AMP
+    agents. Calling the function more than once is safe.
+    """
+    if getattr(agent, "_solo_amp_reward_tracking", False):
+        return True
+    if not hasattr(agent, "discriminator") or not hasattr(agent, "_amp_observation_preprocessor"):
+        return False
+
+    try:
+        from skrl.agents.torch import Agent as TorchAgent
+    except ImportError:
+        return False
+
+    original_record_transition = agent.record_transition
+
+    def record_transition_with_amp_reward(self, **transition):
+        raw_reward = transition["rewards"]
+        components = amp_reward_components(self, transition["infos"]["amp_obs"], raw_reward)
+        effective_reward = raw_reward if components is None else components["effective_reward"]
+
+        # AMP.record_transition must see the raw task reward because AMP.update
+        # applies task/style scales itself. Suppress only the base-class reward
+        # tracker during that call, then update it once with the effective reward.
+        write_interval = self.write_interval
+        self.write_interval = 0
+        try:
+            original_record_transition(**transition)
+        finally:
+            self.write_interval = write_interval
+
+        if write_interval > 0:
+            tracked_transition = dict(transition)
+            tracked_transition["rewards"] = effective_reward
+            TorchAgent.record_transition(self, **tracked_transition)
+
+            if components is not None:
+                self.track_data("Reward / AMP task reward (mean)", components["scaled_task"].mean().item())
+                self.track_data("Reward / AMP style reward (mean)", components["scaled_style"].mean().item())
+                self.track_data("Reward / AMP effective reward (mean)", effective_reward.mean().item())
+
+    agent.record_transition = MethodType(record_transition_with_amp_reward, agent)
+    agent._solo_amp_reward_tracking = True
+    return True

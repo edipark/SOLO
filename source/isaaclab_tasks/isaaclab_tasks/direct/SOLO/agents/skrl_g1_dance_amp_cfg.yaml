@@ -72,8 +72,9 @@ agent:
   value_loss_scale: 2.5
   discriminator_loss_scale: 6.0
   amp_batch_size: 512
-  task_reward_scale: 0.5
-  style_reward_scale: 1.0
+  # SKRL 2.x equivalent of the source G1's pure-AMP objective.
+  task_reward_scale: 0.0
+  style_reward_scale: 2.0
   discriminator_batch_size: 4096
   discriminator_logit_regularization_scale: 0.05
   discriminator_gradient_penalty_scale: 5.0

@@ -96,7 +96,6 @@ Table of Contents
    source/setup/quickstart
    source/overview/own-project/index
    source/setup/walkthrough/index
-   source/tutorials/index
    source/how-to/index
    source/overview/developer-guide/index
 
@@ -119,11 +118,9 @@ Table of Contents
    :maxdepth: 2
    :caption: Features
 
-   source/features/hydra
    source/features/multi_gpu
    source/features/population_based_training
    Tiled Rendering</source/overview/core-concepts/sensors/camera>
-   source/features/ray
    source/features/reproducibility
 
 

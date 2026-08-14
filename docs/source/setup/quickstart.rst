@@ -181,7 +181,8 @@ by calling the ``list_envs.py`` script, which can be found in ``isaaclab/scripts
     +--------+----------------------+--------------------------------------------+---------------------------------------------------------------+
 
 Notice that there are two different ``Ant`` tasks, one for a ``Direct`` environment and one for a ``ManagerBased`` environment.
-These are the :ref:`two primary workflows<feature-workflows>` that you can use with Isaac Lab out of the box. The Direct workflow will give you the
+These are the `two primary workflows
+<https://isaac-sim.github.io/IsaacLab/main/source/overview/core-concepts/task_workflows.html>`__ in upstream Isaac Lab. The Direct workflow will give you the
 shortest path to a working custom environment for reinforcement learning, but the Manager based workflow will give your project the modularity required
 for more generalized development.  For the purposes of this quickstart guide, we will only focus on the Direct workflow.
 
@@ -237,7 +238,8 @@ Configurations
 
 Regardless of what you are going to be doing with Isaac Lab, you will need to deal with **Configurations**. Configurations
 can all be identified by the inclusion of the ``@configclass`` decorator above their class definition and the lack of an ``__init__`` function. For example, consider
-this configuration class for the :ref:`cartpole environment <tutorial-create-direct-rl-env>`.
+this configuration class from the `upstream direct Cartpole tutorial
+<https://isaac-sim.github.io/IsaacLab/main/source/tutorials/03_envs/create_direct_rl_env.html>`__.
 
 .. code-block:: python
 
@@ -287,7 +289,8 @@ Robots
 
 Robots are entirely defined as instances of configurations within Isaac Lab.  If you examine ``source/isaaclab_assets/isaaclab_assets/robots``, you will see a number of files, each of which
 contains configurations for the robot in question.  The purpose of these individual files is to better define scope for all the different robots, but there is nothing preventing
-you from :ref:`adding your own <tutorial-add-new-robot>` to your project or even to the ``isaaclab`` repository! For example, consider the following configuration for
+you from `adding your own robot
+<https://isaac-sim.github.io/IsaacLab/main/source/tutorials/01_assets/add_new_robot.html>`__ to your project or even to the ``isaaclab`` repository! For example, consider the following configuration for
 the Dofbot
 
 .. code-block:: python

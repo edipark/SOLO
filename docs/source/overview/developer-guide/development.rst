@@ -167,4 +167,5 @@ The following snippet shows how to write a standalone application:
 
 It is necessary to launch the simulator before running any other code because extensions are hot-loaded
 when the simulator starts. Many Omniverse modules become available only after the simulator is launched.
-For further details, we recommend exploring the Isaac Lab :ref:`tutorials`.
+For further details, explore the `upstream Isaac Lab tutorials
+<https://isaac-sim.github.io/IsaacLab/main/source/tutorials/index.html>`__.

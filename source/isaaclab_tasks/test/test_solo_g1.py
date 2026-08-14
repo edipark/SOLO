@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+from collections import defaultdict, deque
 from pathlib import Path
 import sys
 from types import SimpleNamespace
@@ -110,41 +111,6 @@ def test_skrl_action_clipping_is_delegated_to_the_environment():
     for path in (SOLO_DIR / "agents").glob("*.yaml"):
         config = yaml.safe_load(path.read_text(encoding="utf-8"))
         assert config["models"]["policy"]["clip_actions"] is False
-
-
-def test_dextra_aligned_task_reward_and_saturation():
-    one = torch.ones(1)
-    zero = torch.zeros(1)
-    walk = task_math.compose_task_reward(
-        one,
-        one,
-        one,
-        zero,
-        zero,
-        velocity_weight=0.5,
-        upright_weight=0.0,
-        height_weight=0.0,
-        action_rate_weight=0.05,
-        saturation_weight=0.05,
-    )
-    dance = task_math.compose_task_reward(
-        zero,
-        one,
-        one,
-        zero,
-        zero,
-        velocity_weight=0.0,
-        upright_weight=0.325,
-        height_weight=0.175,
-        action_rate_weight=0.05,
-        saturation_weight=0.05,
-    )
-    assert walk.item() == pytest.approx(0.5)
-    assert dance.item() == pytest.approx(0.5)
-    penalty = task_math.normalized_saturation_huber(
-        torch.tensor([[1.0, 2.0, 3.0]]), torch.ones(1, 3)
-    )
-    assert penalty.item() == pytest.approx((0.0 + 0.5 + 1.5) / 3.0)
 
 
 def test_observation_schemas_round_trip():
@@ -267,13 +233,16 @@ def test_rollout_diagnostics_npz_and_plot(tmp_path):
     assert all(Path(path).is_file() for path in artifacts["joint_plots"])
 
 
-def test_dextra_aligned_environment_and_implicit_actuator_source():
+def test_amp_environment_and_implicit_actuator_source():
     env_source = (SOLO_DIR / "g1_amp_env_cfg.py").read_text(encoding="utf-8")
+    env_impl_source = (SOLO_DIR / "g1_amp_env.py").read_text(encoding="utf-8")
     robot_source = (SOLO_DIR / "g1_robot_cfg.py").read_text(encoding="utf-8")
     assert 'reset_strategy = "default"' in env_source
     assert "vel_window_min_vx = 0.01" in env_source
     assert "vel_window_steps = 10" in env_source
-    assert "saturation_penalty = 0.05" in env_source
+    assert "upright_weight" not in env_source
+    assert "height_weight" not in env_source
+    assert "raw_task = torch.zeros" in env_impl_source
     assert "env_spacing=4.0" in env_source
     assert "GroundPlaneCfg" in (SOLO_DIR / "g1_amp_env.py").read_text(encoding="utf-8")
     assert "DCMotorCfg" not in robot_source
@@ -298,22 +267,87 @@ def test_skrl_2_yaml_and_style_scale():
         assert config["agent"]["mini_batches"] == 2
         assert config["agent"]["learning_rate"] == pytest.approx(5.0e-5)
         assert config["agent"]["learning_rate_scheduler"] is None
-        assert config["agent"]["entropy_loss_scale"] == pytest.approx(0.005)
+        expected_entropy = 0.0 if config["agent"]["class"] == "AMP" else 0.005
+        assert config["agent"]["entropy_loss_scale"] == pytest.approx(expected_entropy)
         assert config["agent"]["time_limit_bootstrap"] is True
         assert config["models"]["policy"]["min_log_std"] == pytest.approx(-3.5)
         assert config["models"]["policy"]["initial_log_std"] == pytest.approx(-1.2)
         assert config["trainer"]["timesteps"] == 80000
         if config["agent"]["class"] == "AMP":
-            assert config["agent"]["task_reward_scale"] == pytest.approx(0.5)
-            assert config["agent"]["style_reward_scale"] == pytest.approx(1.0)
+            assert config["agent"]["task_reward_scale"] == pytest.approx(0.0)
+            assert config["agent"]["style_reward_scale"] == pytest.approx(2.0)
             assert config["agent"]["discriminator_loss_scale"] == pytest.approx(6.0)
             assert config["models"]["policy"]["network"][0]["layers"] == [512, 256]
             assert config["models"]["discriminator"]["network"][0]["layers"] == [1024, 512, 256]
     raw_task, raw_style = torch.tensor([1.5]), torch.tensor([0.25])
     task, style, total = compat.scaled_reward(raw_task, raw_style)
-    assert task.item() == pytest.approx(0.75)
-    assert style.item() == pytest.approx(0.25)
-    assert total.item() == pytest.approx(1.0)
+    assert task.item() == pytest.approx(0.0)
+    assert style.item() == pytest.approx(0.5)
+    assert total.item() == pytest.approx(0.5)
+
+
+def test_amp_effective_reward_tracking_preserves_raw_rollout_reward():
+    pytest.importorskip("skrl")
+    from skrl.agents.torch import Agent as TorchAgent
+
+    class IdentityPreprocessor:
+        def __call__(self, value, *args, **kwargs):
+            return value
+
+    class Discriminator:
+        def act(self, inputs, role):
+            # sigmoid(0) produces raw style reward -log(0.5).
+            observations = inputs["observations"]
+            return torch.zeros((observations.shape[0], 1)), {}
+
+    class Config:
+        task_reward_scale = 0.0
+        style_reward_scale = 2.0
+
+    class FakeAmp:
+        discriminator = Discriminator()
+        _amp_observation_preprocessor = IdentityPreprocessor()
+        cfg = Config()
+        write_interval = 1
+        tracking_data = defaultdict(list)
+        _cumulative_rewards = None
+        _cumulative_timesteps = None
+        _track_rewards = deque(maxlen=100)
+        _track_timesteps = deque(maxlen=100)
+
+        def __init__(self):
+            self.raw_rewards = []
+
+        def record_transition(self, **transition):
+            TorchAgent.record_transition(self, **transition)
+            self.raw_rewards.append(transition["rewards"].clone())
+
+        def track_data(self, tag, value):
+            self.tracking_data[tag].append(value)
+
+    agent = FakeAmp()
+    assert compat.install_amp_reward_tracking(agent)
+    assert compat.install_amp_reward_tracking(agent)
+
+    transition = {
+        "observations": torch.zeros((1, 1)),
+        "states": None,
+        "actions": torch.zeros((1, 1)),
+        "rewards": torch.zeros((1, 1)),
+        "next_observations": torch.zeros((1, 1)),
+        "next_states": None,
+        "terminated": torch.ones((1, 1), dtype=torch.bool),
+        "truncated": torch.zeros((1, 1), dtype=torch.bool),
+        "infos": {"amp_obs": torch.zeros((1, 4))},
+        "timestep": 0,
+        "timesteps": 1,
+    }
+    agent.record_transition(**transition)
+
+    assert agent.raw_rewards[0].item() == pytest.approx(0.0)
+    expected = 2.0 * -torch.log(torch.tensor(0.5)).item()
+    assert agent.tracking_data["Reward / Total reward (mean)"][-1] == pytest.approx(expected)
+    assert agent.tracking_data["Reward / AMP effective reward (mean)"][-1] == pytest.approx(expected)
 
 
 @pytest.mark.parametrize("key", tuple(compat.OBSOLETE_KEYS))

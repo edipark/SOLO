@@ -57,7 +57,8 @@ Then, run the following command to generate a new external project or internal t
 The generator will guide you in setting up the project/task for your needs by asking you the following questions:
 
 * Type of project/task (external or internal), and project/task path or names according to the selected type.
-* Isaac Lab workflows (see :ref:`feature-workflows`).
+* Isaac Lab workflows (see the `upstream task-workflows guide
+  <https://isaac-sim.github.io/IsaacLab/main/source/overview/core-concepts/task_workflows.html>`__).
 * Reinforcement learning libraries (see :ref:`rl-frameworks`), and algorithms (if the selected libraries support multiple algorithms).
 
 External project usage (once generated)

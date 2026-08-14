@@ -239,6 +239,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # https://skrl.readthedocs.io/en/latest/api/utils/runner.html
     runner = Runner(env, agent_cfg)
 
+    # SKRL 2.x tracks only the raw environment reward, although AMP adds its
+    # discriminator reward later during the update. For pure AMP the raw reward
+    # is zero, so use the same effective reward for TensorBoard statistics and
+    # best-checkpoint selection while preserving raw rewards in rollout memory.
+    if algorithm == "amp" and args_cli.ml_framework.startswith("torch"):
+        from isaaclab_tasks.direct.SOLO.skrl_compat import install_amp_reward_tracking
+
+        if install_amp_reward_tracking(runner.agent):
+            print("[INFO] AMP effective reward tracking enabled (task + style).")
+
     # load checkpoint (if specified)
     if resume_path:
         print(f"[INFO] Loading model checkpoint from: {resume_path}")

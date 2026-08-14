@@ -572,8 +572,9 @@ In order to enable extensions necessary for XR, and to see the AR Panel in the U
 loaded with an XR experience file. This can be done automatically by passing the ``--xr`` flag to
 any Isaac Lab script that uses :class:`app.AppLauncher`.
 
-For example: you can enable and use XR in any of the :ref:`tutorials` by invoking them with the
-additional ``--xr`` flag.
+For example, upstream Isaac Lab tutorials that use :class:`app.AppLauncher` can enable XR with the
+additional ``--xr`` flag. See the `upstream tutorial index
+<https://isaac-sim.github.io/IsaacLab/main/source/tutorials/index.html>`__.
 
 
 .. _configure-scene-placement:

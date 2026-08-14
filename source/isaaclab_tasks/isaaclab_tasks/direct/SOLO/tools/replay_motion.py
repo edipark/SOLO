@@ -8,13 +8,20 @@ from pathlib import Path
 from isaaclab.app import AppLauncher
 
 parser = argparse.ArgumentParser(description="Replay a SOLO G1 reference motion")
-parser.add_argument("--motion", default=str(Path(__file__).parents[1] / "motions" / "G1_walk.npz"))
+parser.add_argument(
+    "--file",
+    "--motion",
+    dest="motion",
+    default=str(Path(__file__).parents[1] / "motions" / "G1_walk.npz"),
+    help="Path to the G1 motion NPZ file (--motion is kept as a compatibility alias)",
+)
 parser.add_argument("--record-output", default=None)
 parser.add_argument("--loops", type=int, default=0, help="0 repeats until the app closes")
 parser.add_argument("--speed", type=float, default=1.0)
 parser.add_argument("--video", action="store_true")
 parser.add_argument("--video-length", type=int, default=600, help="Length in physics steps")
 parser.add_argument("--video-dir", default=None)
+parser.add_argument("--matplotlib", action="store_true", help="Also show the motion skeleton in matplotlib")
 parser.add_argument("--print-base-velocity", action="store_true")
 parser.add_argument("--print-base-velocity-interval", type=int, default=30)
 AppLauncher.add_app_launcher_args(parser)
@@ -24,9 +31,11 @@ if args_cli.video:
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
-import torch
 import numpy as np
+import torch
+
 import isaaclab.sim as sim_utils
+from isaaclab.envs import ViewerCfg
 from isaaclab.scene import InteractiveScene, InteractiveSceneCfg
 
 from isaaclab_tasks.direct.SOLO.g1_robot_cfg import G1_SOLO_CFG
@@ -50,7 +59,9 @@ def main():
     sim = sim_utils.SimulationContext(
         sim_utils.SimulationCfg(dt=1.0 / 120.0, device=args_cli.device, render_interval=1)
     )
-    sim.set_camera_view((3.0, 3.0, 2.0), (0.0, 0.0, 0.8))
+    # Use the same default viewer composition as play and recorded rollouts.
+    viewer_cfg = ViewerCfg()
+    sim.set_camera_view(viewer_cfg.eye, viewer_cfg.lookat)
     scene_cfg = InteractiveSceneCfg(num_envs=1, env_spacing=2.0)
     scene_cfg.robot = G1_SOLO_CFG.replace(prim_path="/World/Robot")
     scene = InteractiveScene(scene_cfg)
@@ -76,7 +87,27 @@ def main():
     )
     if args_cli.record_output:
         recorder.start_recording()
+    print(
+        "\n[INFO] G1 motion replay\n"
+        f"  file: {Path(args_cli.motion).resolve()}\n"
+        f"  duration: {motion.duration:.3f} s ({motion.num_frames} frames)\n"
+        f"  speed: {args_cli.speed:.3f}x\n"
+        f"  sim dt: {sim.get_physics_dt():.6f} s\n"
+    )
+
+    if args_cli.matplotlib:
+        import threading
+
+        import matplotlib
+
+        matplotlib.use("TkAgg")
+        from isaaclab_tasks.direct.SOLO.motions.motion_viewer import MotionViewer
+
+        viewer = MotionViewer(args_cli.motion, render_scene=True)
+        threading.Thread(target=viewer.show, daemon=True).start()
+
     video_writer = annotator = render_product = replicator = None
+    video_path = None
     if args_cli.video:
         import imageio.v2 as imageio
         import omni.replicator.core as rep
@@ -84,7 +115,8 @@ def main():
         replicator = rep
         video_dir = Path(args_cli.video_dir or Path(args_cli.motion).resolve().parent / "videos")
         video_dir.mkdir(parents=True, exist_ok=True)
-        video_writer = imageio.get_writer(video_dir / "g1_motion_replay.mp4", fps=30)
+        video_path = video_dir / f"{Path(args_cli.motion).stem}.mp4"
+        video_writer = imageio.get_writer(video_path, fps=30, codec="libx264", quality=8)
         render_product = rep.create.render_product("/OmniverseKit_Persp", (1280, 720))
         annotator = rep.AnnotatorRegistry.get_annotator("rgb", device="cpu")
         annotator.attach([render_product])
@@ -139,12 +171,19 @@ def main():
         if args_cli.record_output:
             recorder.stop_recording()
             recorder.save_data(args_cli.record_output)
-        if annotator is not None:
-            annotator.detach([render_product])
+        if annotator is not None and render_product is not None:
+            try:
+                annotator.detach([render_product])
+            except Exception as exc:
+                print(f"[WARNING] Could not detach RGB annotator: {exc}")
         if replicator is not None and render_product is not None:
-            replicator.destroy.render_product(render_product)
+            try:
+                replicator.destroy.render_product(render_product)
+            except Exception as exc:
+                print(f"[WARNING] Could not destroy render product: {exc}")
         if video_writer is not None:
             video_writer.close()
+            print(f"[INFO] Video saved to: {video_path}")
 
 
 if __name__ == "__main__":

@@ -96,9 +96,13 @@ validation, matplotlib visualization, Isaac Sim replay/recording, conversion, pe
   --file source/isaaclab_tasks/isaaclab_tasks/direct/SOLO/motions/G1_walk.npz
 
 # Isaac Sim replay; --record-output writes another compatible NPZ
-./isaaclab.sh -p source/isaaclab_tasks/isaaclab_tasks/direct/SOLO/tools/replay_motion.py \
-  --motion source/isaaclab_tasks/isaaclab_tasks/direct/SOLO/motions/G1_dance.npz \
+./isaaclab.sh -p source/isaaclab_tasks/isaaclab_tasks/direct/SOLO/replay_motion.py \
+  --file source/isaaclab_tasks/isaaclab_tasks/direct/SOLO/motions/G1_dance.npz \
   --speed 1.0 --video --video-length 600 --print-base-velocity
+
+# Optional side-by-side skeleton view (requires a desktop session)
+./isaaclab.sh -p source/isaaclab_tasks/isaaclab_tasks/direct/SOLO/replay_motion.py \
+  --file source/isaaclab_tasks/isaaclab_tasks/direct/SOLO/motions/G1_walk.npz --matplotlib
 ```
 
 Motion-variance generators and Dextra-specific AX18/hardware/system-identification code are intentionally excluded.

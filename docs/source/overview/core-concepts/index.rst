@@ -7,7 +7,6 @@ This section we introduce core concepts in Isaac Lab.
   :maxdepth: 1
 
 
-  task_workflows
   actuators
   sensors/index.rst
   motion_generators

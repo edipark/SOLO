@@ -40,7 +40,8 @@ The contents of ``jetbot.py`` is fairly minimal
   )
 
 The only purpose of this file is to define a unique scope in which to save our configurations. The details of robot configurations
-can be explored in :ref:`this tutorial <tutorial-add-new-robot>` but most noteworthy for this walkthrough is the ``usd_path`` for the ``spawn``
+can be explored in the `upstream robot-configuration tutorial
+<https://isaac-sim.github.io/IsaacLab/main/source/tutorials/01_assets/add_new_robot.html>`__, but most noteworthy for this walkthrough is the ``usd_path`` for the ``spawn``
 argument of this ``ArticulationCfg``. The Jetbot asset is available to the public via a hosted nucleus server, and that path is defined by
 ``ISAAC_NUCLEUS_DIR``, however any path to a USD file is valid, including local ones!
 

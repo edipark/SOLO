@@ -47,7 +47,8 @@ The high level imports have to be updated as well:
 Updates to class names
 ~~~~~~~~~~~~~~~~~~~~~~
 
-In Isaac Lab, we introduced the concept of task design workflows (see :ref:`feature-workflows`). The Orbit code is using
+In Isaac Lab, we introduced the concept of task design workflows (see the `upstream task-workflows guide
+<https://isaac-sim.github.io/IsaacLab/main/source/overview/core-concepts/task_workflows.html>`__). The Orbit code is using
 the manager-based workflow and the environment specific class names have been updated to reflect this change:
 
 +------------------------+---------------------------------------------------------+

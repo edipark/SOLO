@@ -149,7 +149,39 @@ templates_path = []
 # List of patterns, relative to source directory, that match files and
 # directories to ignore when looking for source files.
 # This pattern also affects html_static_path and html_extra_path.
-exclude_patterns = ["_build", "_redirect", "_templates", "Thumbs.db", ".DS_Store", "README.md", "licenses/*", "plans"]
+# SOLO intentionally carries only the Isaac Lab core plus its direct G1 task and
+# SKRL entry points. The upstream pages below depend on task families, examples,
+# or backends that are not shipped in this repository. Keep them out of the
+# source set instead of masking their missing-file/autodoc warnings.
+solo_removed_upstream_docs = [
+    "source/tutorials/**",
+    "source/features/hydra.rst",
+    "source/features/ray.rst",
+    "source/how-to/draw_markers.rst",
+    "source/how-to/estimate_how_many_cameras_can_run.rst",
+    "source/how-to/multi_asset_spawning.rst",
+    "source/how-to/save_camera_output.rst",
+    "source/overview/core-concepts/task_workflows.rst",
+    "source/overview/core-concepts/sensors/contact_sensor.rst",
+    "source/overview/core-concepts/sensors/frame_transformer.rst",
+    "source/overview/core-concepts/sensors/imu.rst",
+    "source/overview/core-concepts/sensors/ray_caster.rst",
+    "source/setup/walkthrough/training_jetbot_gt.rst",
+    "source/deployment/run_docker_example.rst",
+    "source/api/lab_mimic/isaaclab_mimic.envs.rst",
+]
+
+exclude_patterns = [
+    "_build",
+    "_redirect",
+    "_templates",
+    "Thumbs.db",
+    ".DS_Store",
+    "README.md",
+    "licenses/*",
+    "plans",
+    *solo_removed_upstream_docs,
+]
 
 # Mock out modules that are not available on RTD
 autodoc_mock_imports = [

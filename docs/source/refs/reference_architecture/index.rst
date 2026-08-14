@@ -139,7 +139,8 @@ for each component.
 
 .. tip::
 
-  To learn more on how you can design your own manager-based environment, see :ref:`tutorial-create-manager-rl-env`.
+  To learn more, see the `upstream manager-based environment tutorial
+  <https://isaac-sim.github.io/IsaacLab/main/source/tutorials/03_envs/create_manager_rl_env.html>`__.
 
 
 
@@ -158,7 +159,8 @@ Direct
 In this workflow, you implement a single class that is responsible for computing observations, applying actions, and computing rewards. This workflow allows for direct control of the environment logic.
 
 .. tip::
-  To learn more on how you can design your own direct environment, see :ref:`tutorial-create-direct-rl-env`.
+  To learn more, see the `upstream direct environment tutorial
+  <https://isaac-sim.github.io/IsaacLab/main/source/tutorials/03_envs/create_direct_rl_env.html>`__.
 
 Users can choose from Isaac Lab’s large suite of pre-configured environments or users can define
 their own environments. For more technical information about the two workflows, please see the
@@ -349,7 +351,7 @@ Check out our resources on using Isaac Lab with your robots.
 
 Review Our Documentation & Samples Resources
 
-* :ref:`Isaac Lab Tutorials <tutorials>`
+* `Upstream Isaac Lab Tutorials <https://isaac-sim.github.io/IsaacLab/main/source/tutorials/index.html>`__
 * `Fast-Track Robot Learning in Simulation Using NVIDIA Isaac Lab`_
 * `Supercharge Robotics Workflows with AI and Simulation Using NVIDIA Isaac Sim 4.0 and NVIDIA Isaac Lab`_
 * `Closing the Sim-to-Real Gap: Training Spot Quadruped Locomotion with NVIDIA Isaac Lab <https://developer.nvidia.com/blog/closing-the-sim-to-real-gap-training-spot-quadruped-locomotion-with-nvidia-isaac-lab/>`__

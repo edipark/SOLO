@@ -32,14 +32,6 @@ After cloning, you can choose the deployment workflow that fits your needs:
     image extensions (like ROS 2), and optional CloudXR streaming support.
   - Covers running pre-built Isaac Lab containers from NVIDIA NGC for headless training.
 
-- :doc:`run_docker_example`
-
-  - Learn how to run a development workflow inside the Isaac Lab Docker container.
-  - Demonstrates building the container, entering it, executing a sample Python script (`log_time.py`),
-    and retrieving logs using mounted volumes.
-  - Highlights bind-mounted directories for live code editing and explains how to stop or remove the container
-    while keeping the image and artifacts.
-
 - :doc:`cluster`
 
   - Learn how to run Isaac Lab on high-performance computing (HPC) clusters.
@@ -60,6 +52,5 @@ After cloning, you can choose the deployment workflow that fits your needs:
    :hidden:
 
    docker
-   run_docker_example
    cluster
    cloudxr_teleoperation_cluster
