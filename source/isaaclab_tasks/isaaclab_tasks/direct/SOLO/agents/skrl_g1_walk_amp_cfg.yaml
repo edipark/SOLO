@@ -6,9 +6,9 @@ models:
     class: GaussianMixin
     clip_actions: false
     clip_log_std: true
-    min_log_std: -20.0
+    min_log_std: -3.5
     max_log_std: 2.0
-    initial_log_std: -2.9
+    initial_log_std: -1.2
     fixed_log_std: false
     network:
       - name: net
@@ -31,7 +31,7 @@ models:
     network:
       - name: net
         input: OBSERVATIONS
-        layers: [1024, 512]
+        layers: [2048, 1024, 512]
         activations: relu
     output: ONE
 
@@ -53,9 +53,8 @@ agent:
   discount_factor: 0.99
   gae_lambda: 0.95
   learning_rate: 5.0e-05
-  learning_rate_scheduler: KLAdaptiveLR
-  learning_rate_scheduler_kwargs:
-    kl_threshold: 0.008
+  learning_rate_scheduler: null
+  learning_rate_scheduler_kwargs: null
   observation_preprocessor: RunningStandardScaler
   observation_preprocessor_kwargs: null
   state_preprocessor: null
@@ -71,7 +70,7 @@ agent:
   value_clip: 0.2
   entropy_loss_scale: 0.0
   value_loss_scale: 2.5
-  discriminator_loss_scale: 5.0
+  discriminator_loss_scale: 6.0
   amp_batch_size: 512
   task_reward_scale: 1.0
   style_reward_scale: 2.0
@@ -79,7 +78,7 @@ agent:
   discriminator_logit_regularization_scale: 0.05
   discriminator_gradient_penalty_scale: 5.0
   discriminator_weight_decay_scale: 1.0e-04
-  time_limit_bootstrap: false
+  time_limit_bootstrap: true
   experiment:
     directory: g1_solo_amp_walk
     experiment_name: ""

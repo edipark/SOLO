@@ -19,6 +19,10 @@ encoder quantization, or EMA filtering is used.
 Train an AMP walk or dance teacher with the 101D G1 motion observation. Both environments combine their task reward
 with the learned style reward. With SKRL 2.x, the independent default scales are
 `task_reward_scale: 1.0` and `style_reward_scale: 2.0`; they are not weights that sum to one.
+Physics runs at 120 Hz with decimation 4 (30 Hz policy control), and the discriminator receives four policy-spaced
+AMP frames (4 x 101D = 404D). Episodes last 20 seconds. The walk task uses a 0.6 m/s reference-aligned target and
+Dextra-style action-rate and normalized torque-saturation penalties; dance keeps posture/height rewards without a
+velocity target.
 
 ```bash
 # Walk AMP

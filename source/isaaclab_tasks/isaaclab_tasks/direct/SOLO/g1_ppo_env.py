@@ -8,13 +8,14 @@ from isaaclab.utils import configclass
 
 from .g1_amp_env import G1AmpEnv
 from .g1_amp_env_cfg import G1AmpWalkEnvCfg
+from .task_math import WALK_TARGET_VELOCITY
 
 
 @configclass
 class G1PpoWalkEnvCfg(G1AmpWalkEnvCfg):
     observation_space = 99
     amp_observation_space = 101
-    target_velocity = 0.8
+    target_velocity = WALK_TARGET_VELOCITY
     command_resample_s = 5.0
 
 
@@ -66,4 +67,3 @@ class G1PpoWalkEnv(G1AmpEnv):
             "metric/base_vel_x": self.robot.data.root_lin_vel_b[:, 0].mean().detach(),
         }
         return reward
-

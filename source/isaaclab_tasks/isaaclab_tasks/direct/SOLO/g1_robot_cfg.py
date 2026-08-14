@@ -13,7 +13,9 @@ G1_SOLO_CFG = ArticulationCfg(
     prim_path="{ENV_REGEX_NS}/Robot",
     spawn=sim_utils.UsdFileCfg(
         usd_path=os.path.join(_ASSET_DIR, "g1_29dof_rev_1_0.usd"),
-        activate_contact_sensors=True,
+        # SOLO currently derives rewards from rigid-body state, not contact reports.
+        # Enabling reports for all 39 G1 bodies reserves a very large PhysX GPU buffer.
+        activate_contact_sensors=False,
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
             disable_gravity=False,
             retain_accelerations=False,
@@ -70,4 +72,3 @@ G1_SOLO_CFG = ArticulationCfg(
         ),
     },
 )
-

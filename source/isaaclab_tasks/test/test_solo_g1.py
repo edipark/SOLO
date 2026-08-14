@@ -28,6 +28,7 @@ schema = _load_module("solo_g1_schema_test", SOLO_DIR / "schema.py")
 compat = _load_module("solo_g1_compat_test", SOLO_DIR / "skrl_compat.py")
 models = _load_module("solo_g1_models_test", SOLO_DIR / "estimator" / "models.py")
 reporting = _load_module("solo_g1_reporting_test", SOLO_DIR / "reporting.py")
+task_math = _load_module("solo_g1_task_math_test", SOLO_DIR / "task_math.py")
 
 
 def test_joint_presets_and_dimensions():
@@ -59,6 +60,54 @@ def test_reference_motions_have_the_same_joint_set():
         assert set(names) == set(schema.G1_JOINT_NAMES)
 
 
+def test_dextra_aligned_timing_and_amp_history():
+    import numpy as np
+
+    assert task_math.PHYSICS_DT == pytest.approx(1.0 / 120.0)
+    assert task_math.CONTROL_DECIMATION == 4
+    assert task_math.POLICY_DT == pytest.approx(1.0 / 30.0)
+    assert task_math.EPISODE_LENGTH_S / task_math.POLICY_DT == pytest.approx(600)
+    assert task_math.AMP_HISTORY_STEPS * schema.AMP_OBSERVATION_SCHEMA.policy_dim == 404
+    times = task_math.reference_history_times(np.array([1.0])).reshape(1, -1)
+    assert times.shape == (1, 4)
+    assert np.diff(times[0]) == pytest.approx([-1.0 / 30.0] * 3)
+
+
+def test_dextra_aligned_task_reward_and_saturation():
+    one = torch.ones(1)
+    zero = torch.zeros(1)
+    walk = task_math.compose_task_reward(
+        one,
+        one,
+        one,
+        zero,
+        zero,
+        velocity_weight=0.5,
+        upright_weight=0.0,
+        height_weight=0.0,
+        action_rate_weight=0.05,
+        saturation_weight=0.05,
+    )
+    dance = task_math.compose_task_reward(
+        zero,
+        one,
+        one,
+        zero,
+        zero,
+        velocity_weight=0.0,
+        upright_weight=0.325,
+        height_weight=0.175,
+        action_rate_weight=0.05,
+        saturation_weight=0.05,
+    )
+    assert walk.item() == pytest.approx(0.5)
+    assert dance.item() == pytest.approx(0.5)
+    penalty = task_math.normalized_saturation_huber(
+        torch.tensor([[1.0, 2.0, 3.0]]), torch.ones(1, 3)
+    )
+    assert penalty.item() == pytest.approx((0.0 + 0.5 + 1.5) / 3.0)
+
+
 def test_observation_schemas_round_trip():
     assert schema.AMP_OBSERVATION_SCHEMA.policy_dim == 101
     assert schema.AMP_OBSERVATION_SCHEMA.estimator_target_dim == 9
@@ -86,9 +135,22 @@ def test_skrl_2_yaml_and_style_scale():
         assert not obsolete.intersection(config["agent"])
         compat.validate_skrl_config(config)
         assert config["agent"]["gae_lambda"] == pytest.approx(0.95)
+        assert config["agent"]["rollouts"] == 16
+        assert config["agent"]["learning_epochs"] == 6
+        assert config["agent"]["mini_batches"] == 2
+        assert config["agent"]["learning_rate"] == pytest.approx(5.0e-5)
+        assert config["agent"]["learning_rate_scheduler"] is None
+        assert config["agent"]["entropy_loss_scale"] == pytest.approx(0.005)
+        assert config["agent"]["time_limit_bootstrap"] is True
+        assert config["models"]["policy"]["min_log_std"] == pytest.approx(-3.5)
+        assert config["models"]["policy"]["initial_log_std"] == pytest.approx(-1.2)
+        assert config["trainer"]["timesteps"] == 80000
         if config["agent"]["class"] == "AMP":
             assert config["agent"]["task_reward_scale"] == pytest.approx(1.0)
             assert config["agent"]["style_reward_scale"] == pytest.approx(2.0)
+            assert config["agent"]["discriminator_loss_scale"] == pytest.approx(6.0)
+            assert config["models"]["policy"]["network"][0]["layers"] == [1024, 512]
+            assert config["models"]["discriminator"]["network"][0]["layers"] == [2048, 1024, 512]
     raw_task, raw_style = torch.tensor([1.5]), torch.tensor([0.25])
     task, style, total = compat.scaled_reward(raw_task, raw_style)
     assert task.item() == pytest.approx(1.5)

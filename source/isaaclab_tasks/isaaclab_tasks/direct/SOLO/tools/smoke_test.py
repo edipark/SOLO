@@ -38,6 +38,10 @@ def main():
     cfg = parse_env_cfg(task, device=args.device, num_envs=1)
     env = gym.make(task, cfg=cfg)
     observations, _ = env.reset()
+    assert abs(env.unwrapped.step_dt - 1.0 / 30.0) < 1.0e-9
+    assert env.unwrapped.max_episode_length == 600
+    if task.startswith("Isaac-G1-AMP"):
+        assert env.unwrapped.amp_observation_space.shape == (404,)
     policy_observation = observations["policy"]
     assert policy_observation.shape == (1, observation_dim), policy_observation.shape
     assert env.unwrapped.get_estimator_target().shape == (1, 9)

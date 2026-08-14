@@ -14,6 +14,7 @@ from isaaclab.utils.math import quat_apply
 from .g1_amp_env_cfg import G1AmpEnvCfg
 from .motions.motion_loader import MotionLoader
 from .schema import G1_JOINT_NAMES, G1_KEY_BODY_NAMES
+from .task_math import compose_task_reward, normalized_saturation_huber, reference_history_times
 
 
 class G1AmpEnv(DirectRLEnv):
@@ -103,18 +104,25 @@ class G1AmpEnv(DirectRLEnv):
         height_reward = torch.exp(-((height - self.cfg.nominal_height) / self.cfg.height_sigma).square())
         vx = self.robot.data.body_lin_vel_w[:, self.ref_body_index, 0]
         if self.cfg.task_kind == "walk":
-            velocity = torch.exp(-((vx - self.cfg.target_velocity) / self.cfg.velocity_tracking_sigma).square())
+            velocity = torch.exp(-self.cfg.velocity_tracking_coeff * (vx - self.cfg.target_velocity).square())
         else:
             velocity = torch.zeros_like(vx)
         action_rate = (self.actions - self.previous_actions).square().mean(dim=-1)
-        joint_velocity = self.robot.data.joint_vel.square().mean(dim=-1)
-        raw_task = (
-            self.cfg.velocity_weight * velocity
-            + self.cfg.upright_weight * upright
-            + self.cfg.height_weight * height_reward
-            - self.cfg.action_rate_penalty * action_rate
-            - self.cfg.joint_velocity_penalty * joint_velocity
+        effort_limits = self.robot.data.joint_effort_limits
+        saturation = normalized_saturation_huber(self.robot.data.computed_torque, effort_limits)
+        raw_task = compose_task_reward(
+            velocity,
+            upright,
+            height_reward,
+            action_rate,
+            saturation,
+            velocity_weight=self.cfg.velocity_weight,
+            upright_weight=self.cfg.upright_weight,
+            height_weight=self.cfg.height_weight,
+            action_rate_weight=self.cfg.action_rate_penalty,
+            saturation_weight=self.cfg.saturation_penalty,
         )
+        saturation_fraction = (self.robot.data.computed_torque.abs() >= effort_limits - 1.0e-5).float().mean(dim=-1)
         self.extras["log"] = {
             "reward/raw_task": raw_task.mean().detach(),
             "reward/scaled_task": raw_task.mean().detach(),
@@ -122,9 +130,13 @@ class G1AmpEnv(DirectRLEnv):
             "reward/upright": upright.mean().detach(),
             "reward/height": height_reward.mean().detach(),
             "penalty/action_rate": action_rate.mean().detach(),
-            "penalty/joint_velocity": joint_velocity.mean().detach(),
+            "penalty/action_rate_weighted": (self.cfg.action_rate_penalty * action_rate.mean()).detach(),
+            "penalty/saturation": saturation.mean().detach(),
+            "penalty/saturation_weighted": (self.cfg.saturation_penalty * saturation.mean()).detach(),
             "metric/base_vel_x": vx.mean().detach(),
             "metric/base_height": height.mean().detach(),
+            "metric/joint_velocity_squared": self.robot.data.joint_vel.square().mean().detach(),
+            "metric/torque_saturation_fraction": saturation_fraction.mean().detach(),
         }
         return raw_task
 
@@ -175,10 +187,8 @@ class G1AmpEnv(DirectRLEnv):
     def collect_reference_motions(self, num_samples: int, current_times: np.ndarray | None = None):
         if current_times is None:
             current_times = self._motion_loader.sample_times(num_samples)
-        times = (
-            np.expand_dims(current_times, -1)
-            - self._motion_loader.dt * np.arange(self.cfg.num_amp_observations)
-        ).flatten()
+        policy_dt = self.cfg.sim.dt * self.cfg.decimation
+        times = reference_history_times(current_times, self.cfg.num_amp_observations, policy_dt)
         dof_pos, dof_vel, body_pos, body_rot, body_lin, body_ang = self._motion_loader.sample(
             num_samples, times
         )
