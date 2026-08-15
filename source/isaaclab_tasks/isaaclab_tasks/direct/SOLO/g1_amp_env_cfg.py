@@ -37,6 +37,12 @@ class G1AmpEnvCfg(DirectRLEnvCfg):
     reference_body = "pelvis"
     reset_strategy = "random"
 
+    # World +X velocity task reward. Disabled in the base/dance task and
+    # enabled by G1AmpWalkEnvCfg, matching SOLO_DEXTRA's reward equation.
+    target_velocity = 0.6
+    velocity_tracking_coeff = 2.0
+    velocity_reward_weight = 0.0
+
     sim: SimulationCfg = SimulationCfg(
         dt=PHYSICS_DT,
         render_interval=decimation,
@@ -49,6 +55,7 @@ class G1AmpEnvCfg(DirectRLEnvCfg):
 @configclass
 class G1AmpWalkEnvCfg(G1AmpEnvCfg):
     motion_file = os.path.join(MOTIONS_DIR, "G1_walk.npz")
+    velocity_reward_weight = 0.5
 
 
 @configclass

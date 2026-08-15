@@ -121,11 +121,12 @@ class G1AmpEnv(DirectRLEnv):
         return {"policy": obs}
 
     def _get_rewards(self) -> torch.Tensor:
-        # Match linden713/humanoid_amp: the environment contributes no
-        # hand-crafted reward. SKRL supplies the discriminator style reward.
-        raw_task = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
         height = self.robot.data.body_pos_w[:, self.ref_body_index, 2]
         vx = self.robot.data.body_lin_vel_w[:, self.ref_body_index, 0]
+        velocity_reward = torch.exp(
+            -self.cfg.velocity_tracking_coeff * (vx - self.cfg.target_velocity).square()
+        )
+        raw_task = self.cfg.velocity_reward_weight * velocity_reward
         action_rate = (self.actions - self.previous_actions).square().mean(dim=-1)
         effort_limits = self.robot.data.joint_effort_limits
         saturation_fraction = (self.robot.data.computed_torque.abs() >= effort_limits - 1.0e-5).float().mean(dim=-1)
@@ -133,6 +134,8 @@ class G1AmpEnv(DirectRLEnv):
         self.extras["log"] = {
             **previous_log,
             "reward/raw_task": raw_task.mean().detach(),
+            "reward/velocity_tracking": velocity_reward.mean().detach(),
+            "reward/velocity_tracking_weighted": raw_task.mean().detach(),
             "metric/action_rate": action_rate.mean().detach(),
             "metric/base_vel_x": vx.mean().detach(),
             "metric/base_height": height.mean().detach(),

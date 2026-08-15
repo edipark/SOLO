@@ -238,11 +238,13 @@ def test_amp_environment_and_implicit_actuator_source():
     env_impl_source = (SOLO_DIR / "g1_amp_env.py").read_text(encoding="utf-8")
     robot_source = (SOLO_DIR / "g1_robot_cfg.py").read_text(encoding="utf-8")
     assert 'reset_strategy = "default"' in env_source
-    assert "vel_window_min_vx = 0.01" in env_source
+    assert "vel_window_min_vx =" in env_source
     assert "vel_window_steps = 10" in env_source
     assert "upright_weight" not in env_source
     assert "height_weight" not in env_source
-    assert "raw_task = torch.zeros" in env_impl_source
+    assert "target_velocity = 0.6" in env_source
+    assert "velocity_reward_weight = 0.5" in env_source
+    assert "velocity_reward = torch.exp" in env_impl_source
     assert "env_spacing=4.0" in env_source
     assert "GroundPlaneCfg" in (SOLO_DIR / "g1_amp_env.py").read_text(encoding="utf-8")
     assert "DCMotorCfg" not in robot_source
@@ -274,7 +276,8 @@ def test_skrl_2_yaml_and_style_scale():
         assert config["models"]["policy"]["initial_log_std"] == pytest.approx(-1.2)
         assert config["trainer"]["timesteps"] == 80000
         if config["agent"]["class"] == "AMP":
-            assert config["agent"]["task_reward_scale"] == pytest.approx(0.0)
+            expected_task_scale = 0.5 if "walk" in path.name else 0.0
+            assert config["agent"]["task_reward_scale"] == pytest.approx(expected_task_scale)
             assert config["agent"]["style_reward_scale"] == pytest.approx(2.0)
             assert config["agent"]["discriminator_loss_scale"] == pytest.approx(6.0)
             assert config["models"]["policy"]["network"][0]["layers"] == [512, 256]

@@ -63,7 +63,21 @@ def main():
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--headless", action="store_true")
     args = parser.parse_args()
-    checkpoints = dict(item.split("=", 1) for item in args.teacher_checkpoint)
+    # Accept either multiple TASK=PATH mappings or a single PATH when one task is specified.
+    checkpoints = {}
+    for item in args.teacher_checkpoint:
+        if "=" in item:
+            key, val = item.split("=", 1)
+            checkpoints[key] = val
+        else:
+            # If caller provided a single path and only one task is requested,
+            # treat the lone value as the checkpoint for that task (SOLO_DEXTRA-style).
+            if len(args.teacher_checkpoint) == 1 and len(args.tasks) == 1:
+                checkpoints[args.tasks[0]] = item
+            else:
+                raise ValueError(
+                    f"Invalid --teacher-checkpoint '{item}'. Use TASK=PATH for multiple tasks, or provide a single PATH when --tasks has one entry."
+                )
     missing = [task for task in args.tasks if task not in checkpoints]
     if missing:
         raise ValueError(f"Missing --teacher-checkpoint TASK=PATH for: {missing}")
