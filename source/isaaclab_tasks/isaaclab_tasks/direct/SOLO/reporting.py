@@ -12,7 +12,8 @@ from typing import Iterable
 
 
 PRIMARY_METRICS = (
-    "rmse", "mae", "r2", "return_mean", "episode_length_mean", "death_rate", "timeout_rate",
+    "rmse", "mae", "r2", "return_mean", "episode_length_mean", "episode_length_std",
+    "death_rate", "timeout_rate",
     "teacher_action_mse", "action_smoothness", "energy", "torque_rms", "inference_ms_per_sample", "parameters",
     "success_rate", "base_linear_speed", "base_angular_speed", "action_saturation", "torque_saturation",
     "raw_task_reward", "amp_raw_style", "amp_scaled_task", "amp_scaled_style", "amp_effective_reward",
@@ -46,6 +47,15 @@ def aggregate(rows: list[dict]) -> list[dict]:
                 summary[f"{metric}_std"] = stdev(values) if len(values) > 1 else 0.0
                 summary[f"{metric}_ci95"] = 1.96 * summary[f"{metric}_std"] / math.sqrt(len(values))
         output.append(summary)
+    teacher_lengths = {
+        row["task"]: row["episode_length_mean_mean"]
+        for row in output
+        if row["experiment"] == "TeacherGT" and row.get("episode_length_mean_mean", 0.0) > 0.0
+    }
+    for row in output:
+        baseline = teacher_lengths.get(row["task"])
+        if baseline is not None and "episode_length_mean_mean" in row:
+            row["episode_length_ratio_percent"] = 100.0 * row["episode_length_mean_mean"] / baseline
     return output
 
 
@@ -58,22 +68,48 @@ def _write_csv(path: Path, rows: list[dict]) -> None:
 
 
 def _markdown_table(rows: list[dict]) -> str:
-    columns = ["task", "experiment", "successful", "rmse_mean", "r2_mean", "return_mean_mean", "death_rate_mean", "inference_ms_per_sample_mean"]
+    columns = (
+        "Task", "Experiment", "OK/Seeds", "Episode steps", "Within-run sigma",
+        "Death %", "Timeout %", "Teacher ratio %", "Return", "RMSE", "R2", "Latency ms",
+    )
     header = "| " + " | ".join(columns) + " |"
     divider = "| " + " | ".join("---" for _ in columns) + " |"
+
+    def mean_std(row: dict, metric: str, digits: int = 1) -> str:
+        value = row.get(f"{metric}_mean")
+        if value is None:
+            return ""
+        deviation = row.get(f"{metric}_std", 0.0)
+        return f"{value:.{digits}f} ± {deviation:.{digits}f}"
+
     body = []
     for row in rows:
-        body.append("| " + " | ".join(f"{row.get(column, ''):.5g}" if isinstance(row.get(column), float) else str(row.get(column, "")) for column in columns) + " |")
+        cells = (
+            row["task"], row["experiment"], f"{row['successful']}/{row['seeds']}",
+            mean_std(row, "episode_length_mean"), mean_std(row, "episode_length_std"),
+            mean_std(row, "death_rate"), mean_std(row, "timeout_rate"),
+            f"{row['episode_length_ratio_percent']:.1f}" if "episode_length_ratio_percent" in row else "",
+            mean_std(row, "return_mean", 2), mean_std(row, "rmse", 4),
+            mean_std(row, "r2", 4), mean_std(row, "inference_ms_per_sample", 4),
+        )
+        body.append("| " + " | ".join(cells) + " |")
     return "\n".join((header, divider, *body))
 
 
 def _latex_table(rows: list[dict]) -> str:
-    lines = [r"\begin{tabular}{llrrrr}", r"\toprule", r"Task & Experiment & RMSE & $R^2$ & Return & Death (\%) \\", r"\midrule"]
+    lines = [
+        r"\begin{tabular}{llrrrrrrr}", r"\toprule",
+        r"Task & Experiment & Episode & Death (\%) & Timeout (\%) & Ratio (\%) & Return & RMSE & $R^2$ \\",
+        r"\midrule",
+    ]
     for row in rows:
+        experiment = row["experiment"].replace("_", r"\_")
         lines.append(
-            f"{row['task']} & {row['experiment']} & {row.get('rmse_mean', float('nan')):.4f} & "
-            f"{row.get('r2_mean', float('nan')):.4f} & {row.get('return_mean_mean', float('nan')):.2f} & "
-            f"{row.get('death_rate_mean', float('nan')):.2f} \\\\"
+            f"{row['task']} & {experiment} & {row.get('episode_length_mean_mean', float('nan')):.1f} $\\pm$ "
+            f"{row.get('episode_length_mean_std', float('nan')):.1f} & {row.get('death_rate_mean', float('nan')):.1f} & "
+            f"{row.get('timeout_rate_mean', float('nan')):.1f} & {row.get('episode_length_ratio_percent', float('nan')):.1f} & "
+            f"{row.get('return_mean_mean', float('nan')):.2f} & {row.get('rmse_mean', float('nan')):.4f} & "
+            f"{row.get('r2_mean', float('nan')):.4f} \\\\"
         )
     lines.extend((r"\bottomrule", r"\end{tabular}"))
     return "\n".join(lines)
@@ -86,7 +122,11 @@ def _plots(output: Path, rows: list[dict], raw_rows: list[dict]) -> list[str]:
 
     artifacts = []
     labels = [f"{row['task'].replace('Isaac-G1-', '')}\n{row['experiment']}" for row in rows]
-    for metric, title in (("rmse", "Estimator RMSE"), ("return_mean", "Closed-loop return"), ("death_rate", "Death rate")):
+    for metric, title in (
+        ("episode_length_mean", "Mean episode length"),
+        ("death_rate", "Death rate"), ("timeout_rate", "Timeout rate"),
+        ("return_mean", "Closed-loop return"), ("rmse", "Estimator RMSE"),
+    ):
         selected = [(index, row) for index, row in enumerate(rows) if f"{metric}_mean" in row]
         if not selected:
             continue

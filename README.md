@@ -57,7 +57,7 @@ Collect frozen-teacher rollouts and train the default two-layer, hidden-256 LSTM
 
 ```bash
 ./isaaclab.sh -p source/isaaclab_tasks/isaaclab_tasks/direct/SOLO/train_state_estimator.py \
-  --teacher-checkpoint <best_agent.pt> \
+  --teacher_checkpoint <best_agent.pt> \
   --task Isaac-G1-AMP-Walk-SOLO-Direct-v0 \
   --estimator LSTM --window 50 --joint-preset all --dagger-rounds 10 --headless
 ```
@@ -109,17 +109,31 @@ Motion-variance generators and Dextra-specific AX18/hardware/system-identificati
 
 ## Ablation
 
-The runner covers teacher, estimator architecture/history/joint presets, and Student DAgger for
-AMP walk, AMP dance, and PPO walk. A failed run is recorded and the remaining matrix continues. Each task needs its
-own teacher checkpoint mapping.
+The runner covers teacher, estimator architecture/history/joint presets, and Student DAgger. Like SOLO_DEXTRA, one
+invocation takes one teacher checkpoint and one task; `amp_walk` is the default. Use `--task amp_dance` or
+`--task ppo_walk` for another task. `--seeds` is a count starting at `--seed_start`.
 
 ```bash
 ./isaaclab.sh -p source/isaaclab_tasks/isaaclab_tasks/direct/SOLO/run_ablation.py \
-  --teacher-checkpoint amp_walk=<walk_amp.pt> \
-  --teacher-checkpoint amp_dance=<dance_amp.pt> \
-  --teacher-checkpoint ppo_walk=<walk_ppo.pt> \
-  --seeds 42 43 44 --headless
+  --teacher_checkpoint <walk_amp.pt> --task amp_walk \
+  --seeds 3 --seed_start 42 --headless
 ```
+
+Estimator collection and Student DAgger collection are independent. Estimator ablations keep the standalone defaults
+(2,000 collection steps, 500k samples, 50 initial epochs, 10 epochs per DAgger round, and 10 rounds). Ablation defaults
+use 100 student iterations, 250 rollout steps and 100 optimizer steps per iteration; override them with
+`--student-iterations`, `--student-collect-steps`, and `--student-train-steps`. Initial teacher rollouts are cached per
+teacher/task/seed: the longest requested history up to 50 frames is projected to shorter windows and joint subsets and
+shared across LSTM/TCN/MLP. The memory-heavy 100-frame experiment uses a separate cache. Model-dependent DAgger rollouts
+are not shared.
+Runs stay sequential on a single GPU to avoid multiple Isaac Sim processes competing for VRAM, while subprocess output
+is streamed live to the terminal and `process_logs/`.
+Use `--experiments LSTM_DAgger_w50_all --skip-student` for a targeted estimator rerun.
+
+Each argument/checkpoint/code combination is isolated under `ablation/sessions/<run-signature>/`. Repeated attempts have
+separate artifact and TensorBoard directories; `raw_results.jsonl` remains an audit log while reports use only the latest
+record for each task/seed/experiment. Dataset cache keys include the teacher checkpoint contents and estimator/environment
+implementation, and an output-directory lock rejects overlapping ablation launchers.
 
 Outputs include raw JSONL, aggregate JSON, tidy/summary CSV, Markdown and LaTeX tables, `report.md`, and PNG/PDF
 plots with mean, standard deviation, and 95% confidence intervals. Estimator error, target-specific error, closed-loop

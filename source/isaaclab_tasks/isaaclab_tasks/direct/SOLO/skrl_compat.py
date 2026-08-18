@@ -60,6 +60,18 @@ def prepare_runner_config(config: MutableMapping) -> MutableMapping:
     return config
 
 
+def force_skrl_isaaclab_reset(env) -> None:
+    """Re-enable physical reset on SKRL's reset-once Isaac Lab wrapper."""
+    current = env
+    for _ in range(32):
+        if hasattr(current, "_reset_once"):
+            current._reset_once = True
+        next_env = getattr(current, "_env", None)
+        if next_env is None or next_env is current:
+            break
+        current = next_env
+
+
 def deterministic_action(agent, observations, states=None):
     """Use only the public SKRL 2.x inference API."""
     outputs = agent.act(observations, states, timestep=0, timesteps=0)

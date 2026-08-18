@@ -58,14 +58,20 @@ from isaaclab_tasks.direct.SOLO.estimator.models import (
     dagger_beta,
 )
 from isaaclab_tasks.direct.SOLO.schema import JOINT_PRESETS, SCHEMA_VERSION
-from isaaclab_tasks.direct.SOLO.skrl_compat import prepare_runner_config, require_skrl_2
+from isaaclab_tasks.direct.SOLO.skrl_compat import (
+    force_skrl_isaaclab_reset,
+    prepare_runner_config,
+    require_skrl_2,
+)
 
 
 @hydra_task_config(args_cli.task, args_cli.agent)
 def main(env_cfg, agent_cfg):
     torch.manual_seed(args_cli.seed)
+    agent_cfg["seed"] = args_cli.seed
     env_cfg.scene.num_envs = args_cli.num_envs
     env_cfg.sim.device = args_cli.device
+    env_cfg.seed = args_cli.seed
     prepare_runner_config(agent_cfg)
     env = SkrlVecEnvWrapper(gym.make(args_cli.task, cfg=env_cfg), ml_framework="torch")
     agent_cfg["trainer"]["close_environment_at_exit"] = False
@@ -99,6 +105,7 @@ def main(env_cfg, agent_cfg):
     best_iteration = 0
     best_metrics: dict = {}
     evaluation_history: list[dict] = []
+    force_skrl_isaaclab_reset(env)
     observations, _ = env.reset()
     started = time.monotonic()
 
@@ -139,6 +146,7 @@ def main(env_cfg, agent_cfg):
     @torch.no_grad()
     def evaluate() -> tuple[dict, torch.Tensor]:
         student.eval()
+        force_skrl_isaaclab_reset(env)
         eval_observations, _ = env.reset()
         lengths = torch.zeros(eval_observations.shape[0], device=device)
         returns = torch.zeros_like(lengths)
@@ -173,17 +181,24 @@ def main(env_cfg, agent_cfg):
             if completed_returns
             else float(returns.mean())
         )
+        episode_length_std = (
+            float(torch.tensor(completed_lengths).std(unbiased=False))
+            if completed_lengths else float(lengths.std(unbiased=False))
+        )
         completed = deaths + timeouts
         metrics = {
             "action_mse": mse_total / args_cli.eval_steps,
             "episode_length_mean": mean_length,
+            "episode_length_std": episode_length_std,
             "return_mean": mean_return,
             "student_action_norm": action_norm_total / args_cli.eval_steps,
             "deaths": deaths,
             "timeouts": timeouts,
             "death_rate": 100.0 * deaths / completed if completed else 0.0,
             "timeout_rate": 100.0 * timeouts / completed if completed else 0.0,
+            "success_rate": 100.0 * timeouts / completed if completed else 0.0,
         }
+        force_skrl_isaaclab_reset(env)
         return metrics, env.reset()[0]
 
     try:

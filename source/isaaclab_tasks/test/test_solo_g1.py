@@ -6,7 +6,9 @@ import importlib.util
 import json
 from collections import defaultdict, deque
 from pathlib import Path
+import subprocess
 import sys
+import types
 from types import SimpleNamespace
 
 import pytest
@@ -37,6 +39,22 @@ rollout_diagnostics = _load_module(
 )
 
 
+def _load_pipeline_module():
+    package = "solo_pipeline_test_package"
+    estimator_package = f"{package}.estimator"
+    for name in (package, estimator_package):
+        module = types.ModuleType(name)
+        module.__path__ = []
+        sys.modules[name] = module
+    sys.modules[f"{package}.schema"] = schema
+    sys.modules[f"{package}.skrl_compat"] = compat
+    adapters_stub = types.ModuleType(f"{estimator_package}.adapters")
+    adapters_stub.PolicyAdapter = object
+    sys.modules[adapters_stub.__name__] = adapters_stub
+    sys.modules[f"{estimator_package}.models"] = models
+    return _load_module(f"{estimator_package}.pipeline", SOLO_DIR / "estimator" / "pipeline.py")
+
+
 def test_joint_presets_and_dimensions():
     assert len(schema.G1_JOINT_NAMES) == 29
     assert len(schema.G1_LEG_JOINT_NAMES) == 12
@@ -47,6 +65,32 @@ def test_joint_presets_and_dimensions():
     shuffled = tuple(reversed(schema.G1_JOINT_NAMES))
     ids = schema.joint_indices(shuffled, "all")
     assert tuple(shuffled[index] for index in ids) == schema.G1_JOINT_NAMES
+
+
+def test_rollout_dataset_bounded_append_and_history_projection():
+    pipeline = _load_pipeline_module()
+
+    def dataset(start, count):
+        ids = torch.arange(start, start + count)
+        return pipeline.RolloutDataset(
+            histories=ids[:, None, None].expand(-1, 4, 6).clone(),
+            targets=ids[:, None].clone(),
+            frames=ids[:, None].expand(-1, 6).clone(),
+            teacher_actions=ids[:, None].clone(),
+        )
+
+    torch.manual_seed(7)
+    combined = dataset(0, 4).append(dataset(4, 6), max_size=5)
+    assert combined.histories.shape == (5, 4, 6)
+    assert torch.equal(combined.histories[:, 0, 0], combined.targets[:, 0])
+    assert torch.equal(combined.frames[:, 0], combined.targets[:, 0])
+    assert torch.equal(combined.teacher_actions[:, 0], combined.targets[:, 0])
+
+    source = dataset(0, 4)
+    assert source.project_joint_history((0, 1, 2), 4, 4, 3) is source
+    projected = source.project_joint_history((0, 2), 4, 2, 3)
+    assert projected.histories.shape == (4, 2, 4)
+    assert projected.frames.shape == (4, 4)
 
 
 def test_joint_validation_fails_early():
@@ -210,6 +254,119 @@ def test_dextra_aligned_pipeline_entry_points():
     assert not (SOLO_DIR / "play_with_estimator.py").exists()
 
 
+def test_ablation_uses_dextra_style_cli_cache_and_separate_student_rollout(tmp_path):
+    script = SOLO_DIR / "run_ablation.py"
+    result = subprocess.run(
+        [
+            sys.executable, str(script), "--teacher_checkpoint", str(tmp_path / "teacher.pt"),
+            "--dry-run", "--fast", "--seeds", "1", "--headless",
+            "--output-dir", str(tmp_path / "ablation"),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    output = result.stdout
+    assert "task=amp_walk" in output
+    assert "student: iterations=5, collect=50, train_steps=20" in output
+    assert "--teacher_checkpoint" in output
+    assert "--student-collect-steps" not in output  # translated to train_dagger --rollout-steps
+    cache_lines = [line for line in output.splitlines() if "--dataset-cache" in line]
+    assert len(cache_lines) == 5  # all fast-matrix estimator variants share the initial rollout
+    cache_paths = [line.split("--dataset-cache ", 1)[1].split()[0] for line in cache_lines]
+    assert len(set(cache_paths)) == 1
+    assert all("--dataset-cache-window 50" in line for line in cache_lines)
+    assert all("--max_dataset_size 20000" in line for line in cache_lines)  # --fast override
+
+
+def test_ablation_estimator_defaults_match_standalone_training(tmp_path):
+    script = SOLO_DIR / "run_ablation.py"
+    result = subprocess.run(
+        [
+            sys.executable, str(script), "--teacher_checkpoint", str(tmp_path / "teacher.pt"),
+            "--dry-run", "--seeds", "1", "--experiments", "LSTM_DAgger_w50_all",
+            "--skip-student", "--output-dir", str(tmp_path / "ablation"),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    command = next(line for line in result.stdout.splitlines() if "train_state_estimator.py" in line)
+    assert "--collect_steps 2000" in command
+    assert "--max_dataset_size 500000" in command
+    assert "--epochs 50" in command
+    assert "--dagger_epochs 10" in command
+    assert "--dagger_rounds 10" in command
+    assert "--eval_episodes 200" in command
+
+
+def test_ablation_shares_short_windows_but_isolates_memory_heavy_w100(tmp_path):
+    result = subprocess.run(
+        [
+            sys.executable, str(SOLO_DIR / "run_ablation.py"),
+            "--teacher_checkpoint", str(tmp_path / "teacher.pt"), "--dry-run", "--seeds", "1",
+            "--experiments", "LSTM_DAgger_w10_all", "LSTM_DAgger_w50_all", "LSTM_DAgger_w100_all",
+            "--skip-student", "--output-dir", str(tmp_path / "ablation"),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    cache_lines = [line for line in result.stdout.splitlines() if "--dataset-cache" in line]
+    assert len(cache_lines) == 3
+    cache_paths = [line.split("--dataset-cache ", 1)[1].split()[0] for line in cache_lines]
+    assert len(set(cache_paths)) == 2
+    short_lines = [line for line in cache_lines if "w100_all" not in line]
+    assert len({line.split("--dataset-cache ", 1)[1].split()[0] for line in short_lines}) == 1
+    assert all("--dataset-cache-window 50" in line for line in short_lines)
+    assert "--dataset-cache-window 100" in next(line for line in cache_lines if "w100_all" in line)
+
+
+def test_ablation_session_changes_when_teacher_contents_change(tmp_path):
+    teacher = tmp_path / "teacher.pt"
+    output_dir = tmp_path / "ablation"
+
+    def session_for(contents: bytes) -> str:
+        teacher.write_bytes(contents)
+        result = subprocess.run(
+            [
+                sys.executable, str(SOLO_DIR / "run_ablation.py"),
+                "--teacher_checkpoint", str(teacher), "--dry-run", "--seeds", "1",
+                "--experiments", "LSTM_DAgger_w50_all", "--skip-student",
+                "--output-dir", str(output_dir),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        line = next(line for line in result.stdout.splitlines() if line.startswith("session="))
+        return line.split()[0].split("=", 1)[1]
+
+    first = session_for(b"checkpoint-a")
+    second = session_for(b"checkpoint-b")
+    assert first != second
+    assert (output_dir / "sessions" / first).is_dir()
+    assert (output_dir / "sessions" / second).is_dir()
+
+
+def test_ablation_latest_records_excludes_old_sessions_and_duplicate_attempts(tmp_path):
+    sys.path.insert(0, str(SOLO_DIR))
+    try:
+        ablation = _load_module("solo_g1_ablation_test", SOLO_DIR / "run_ablation.py")
+    finally:
+        sys.path.remove(str(SOLO_DIR))
+    raw = tmp_path / "raw.jsonl"
+    rows = [
+        {"run_signature": "old", "task": "amp_walk", "seed": 42, "experiment": "LSTM", "value": 99},
+        {"run_signature": "new", "task": "amp_walk", "seed": 42, "experiment": "LSTM", "value": 1},
+        {"run_signature": "new", "task": "amp_walk", "seed": 42, "experiment": "LSTM", "value": 2},
+    ]
+    raw.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    latest = ablation._latest_records(raw, "new")
+    assert len(latest) == 1
+    assert latest[0]["value"] == 2
+
+
 def test_rollout_diagnostics_npz_and_plot(tmp_path):
     joint_count = 3
     data = SimpleNamespace(
@@ -359,6 +516,14 @@ def test_obsolete_skrl_keys_have_migration_hints(key):
         compat.validate_skrl_config({"agent": {key: 1}})
 
 
+def test_force_skrl_reset_reenables_nested_reset_once_wrappers():
+    inner = SimpleNamespace(_reset_once=False, _env=None)
+    outer = SimpleNamespace(_reset_once=False, _env=inner)
+    compat.force_skrl_isaaclab_reset(outer)
+    assert outer._reset_once is True
+    assert inner._reset_once is True
+
+
 def test_report_artifacts_and_failed_run(tmp_path):
     raw = tmp_path / "raw.jsonl"
     rows = [
@@ -371,6 +536,10 @@ def test_report_artifacts_and_failed_run(tmp_path):
                 "rmse": 0.2,
                 "r2": 0.8,
                 "return_mean": 10.0,
+                "episode_length_mean": 580.0,
+                "episode_length_std": 25.0,
+                "death_rate": 3.0,
+                "timeout_rate": 97.0,
                 "target_rmse": [0.1] * 9,
                 "trace_target": [[0.0] * 9, [1.0] * 9],
                 "trace_prediction": [[0.1] * 9, [0.9] * 9],
@@ -380,7 +549,14 @@ def test_report_artifacts_and_failed_run(tmp_path):
                 ],
             },
         },
-        {"task": "amp_walk", "experiment": "LSTM", "seed": 43, "status": "ok", "metrics": {"rmse": 0.3, "r2": 0.7, "return_mean": 12.0}},
+        {
+            "task": "amp_walk", "experiment": "LSTM", "seed": 43, "status": "ok",
+            "metrics": {
+                "rmse": 0.3, "r2": 0.7, "return_mean": 12.0,
+                "episode_length_mean": 600.0, "episode_length_std": 0.0,
+                "death_rate": 0.0, "timeout_rate": 100.0,
+            },
+        },
         {"task": "amp_walk", "experiment": "TCN", "seed": 42, "status": "failed", "error": "synthetic failure"},
     ]
     raw.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
@@ -389,6 +565,12 @@ def test_report_artifacts_and_failed_run(tmp_path):
     for name in ("summary.json", "summary.csv", "results_tidy.csv", "table.md", "table.tex", "report.md"):
         assert (tmp_path / "report" / name).is_file()
     assert "synthetic failure" in (tmp_path / "report" / "report.md").read_text(encoding="utf-8")
+    table = (tmp_path / "report" / "table.md").read_text(encoding="utf-8")
+    assert "Episode steps" in table and "590.0 ± 14.1" in table
+    assert "Death %" in table and "Timeout %" in table
     if result["plots"]:
-        for name in ("target_rmse_heatmap.png", "dagger_learning_curve.png", "representative_trace.png"):
+        for name in (
+            "episode_length_mean.png", "timeout_rate.png", "target_rmse_heatmap.png",
+            "dagger_learning_curve.png", "representative_trace.png",
+        ):
             assert (tmp_path / "report" / name).is_file()

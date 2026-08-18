@@ -4,16 +4,18 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import torch
+import numpy as np
 from torch import nn
 
 from ..schema import JOINT_PRESETS, SCHEMA_VERSION
-from ..skrl_compat import amp_reward_components, require_skrl_2
+from ..skrl_compat import amp_reward_components, force_skrl_isaaclab_reset, require_skrl_2
 from .adapters import PolicyAdapter
 from .models import NormalizedEstimator, build_estimator
 
@@ -26,20 +28,96 @@ class RolloutDataset:
     teacher_actions: torch.Tensor
 
     def append(self, other: "RolloutDataset", max_size: int | None = None) -> "RolloutDataset":
-        values = [torch.cat((getattr(self, field), getattr(other, field))) for field in self.__dataclass_fields__]
-        if max_size is not None and len(values[0]) > max_size:
-            ids = torch.randperm(len(values[0]))[:max_size]
-            values = [value[ids] for value in values]
+        self_size = len(self.histories)
+        other_size = len(other.histories)
+        total_size = self_size + other_size
+        if max_size is None or total_size <= max_size:
+            return RolloutDataset(
+                *(torch.cat((getattr(self, field), getattr(other, field))) for field in self.__dataclass_fields__)
+            )
+
+        # Do not concatenate the complete datasets before truncating. For a
+        # 500k-sample w100 history, the old batch, new batch, concatenation and
+        # indexed result would otherwise coexist and exceed 64 GB of RAM.
+        device = self.histories.device
+        selected = torch.randperm(total_size, device=device)[:max_size]
+        values = []
+        copy_chunk = 4096
+        for field in self.__dataclass_fields__:
+            first = getattr(self, field)
+            second = getattr(other, field)
+            if first.shape[1:] != second.shape[1:]:
+                raise ValueError(f"Cannot append incompatible dataset field {field}")
+            output = torch.empty((max_size, *first.shape[1:]), dtype=first.dtype, device=first.device)
+            for start in range(0, max_size, copy_chunk):
+                stop = min(start + copy_chunk, max_size)
+                source = selected[start:stop]
+                from_first = source < self_size
+                if from_first.any():
+                    destination = torch.arange(start, stop, device=device)[from_first]
+                    output.index_copy_(0, destination, first.index_select(0, source[from_first]))
+                if (~from_first).any():
+                    destination = torch.arange(start, stop, device=device)[~from_first]
+                    output.index_copy_(0, destination, second.index_select(0, source[~from_first] - self_size))
+            values.append(output)
         return RolloutDataset(*values)
 
     def save(self, path: str | Path, metadata: dict | None = None) -> None:
-        Path(path).parent.mkdir(parents=True, exist_ok=True)
-        torch.save({"dataset": self.__dict__, "metadata": metadata or {}}, path)
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(f".{path.name}.pid{os.getpid()}.tmp")
+        try:
+            torch.save({"dataset": self.__dict__, "metadata": metadata or {}}, temporary)
+            os.replace(temporary, path)
+        finally:
+            if temporary.exists():
+                temporary.unlink()
 
     @classmethod
     def load(cls, path: str | Path) -> "RolloutDataset":
         payload = torch.load(path, map_location="cpu", weights_only=True)
         return cls(**payload["dataset"])
+
+    @classmethod
+    def load_with_metadata(cls, path: str | Path) -> tuple["RolloutDataset", dict]:
+        payload = torch.load(path, map_location="cpu", weights_only=True)
+        return cls(**payload["dataset"]), payload.get("metadata", {})
+
+    def project_joint_history(
+        self,
+        joint_ids: tuple[int, ...] | list[int],
+        source_window: int,
+        target_window: int,
+        full_joint_count: int,
+    ) -> "RolloutDataset":
+        """Derive a shorter/subset estimator dataset without recollection.
+
+        The source is expected to contain all joint positions followed by all
+        joint velocities. Taking the newest history suffix is exactly
+        equivalent to collecting with a shorter history buffer.
+        """
+        if target_window > source_window:
+            raise ValueError(f"Cannot derive window {target_window} from cached window {source_window}")
+        joint_ids = tuple(joint_ids)
+        all_joints = joint_ids == tuple(range(full_joint_count))
+        if target_window == source_window and all_joints:
+            return self
+        ids = list(joint_ids) + [full_joint_count + index for index in joint_ids]
+        histories = self.histories[:, -target_window:]
+        if not all_joints:
+            histories = histories[:, :, ids]
+            frames = self.frames[:, ids]
+        else:
+            # Clone a shorter suffix so deleting the source releases the much
+            # larger backing storage of the longest-window cache.
+            histories = histories.clone()
+            frames = self.frames
+        return RolloutDataset(
+            histories=histories,
+            targets=self.targets,
+            frames=frames,
+            teacher_actions=self.teacher_actions,
+        )
 
 
 class HistoryBuffer:
@@ -67,6 +145,7 @@ def collect_rollout(
     action_noise: float = 0.0,
     max_samples: int | None = None,
 ) -> tuple[RolloutDataset, dict]:
+    force_skrl_isaaclab_reset(env)
     observations, _ = env.reset()
     history = HistoryBuffer(observations.shape[0], window, adapter.input_dim, observations.device)
     histories, targets, frames, teacher_actions = [], [], [], []
@@ -166,6 +245,7 @@ def collect_rollout(
         "timeout_rate": 100.0 * timeouts / (deaths + timeouts) if deaths + timeouts else 0.0,
         "return_mean": sum(completed_returns) / len(completed_returns) if completed_returns else 0.0,
         "episode_length_mean": sum(completed_lengths) / len(completed_lengths) if completed_lengths else 0.0,
+        "episode_length_std": float(np.std(completed_lengths)) if completed_lengths else 0.0,
         "success_rate": 100.0 * timeouts / (deaths + timeouts) if deaths + timeouts else 0.0,
         "velocity_source": "sim_joint_velocity",
         **{name: value / max(metric_steps, 1) for name, value in metric_totals.items()},
@@ -190,6 +270,8 @@ def evaluate_estimator_closed_loop(
         raise ValueError("episodes must be positive")
     if seed is not None:
         torch.manual_seed(seed)
+        np.random.seed(seed)
+    force_skrl_isaaclab_reset(env)
     observations, _ = env.reset()
     history = HistoryBuffer(observations.shape[0], window, adapter.input_dim, observations.device)
     returns = torch.zeros(observations.shape[0], device=observations.device)
@@ -234,11 +316,13 @@ def evaluate_estimator_closed_loop(
     return {
         "episodes": len(completed_lengths),
         "episode_length_mean": sum(completed_lengths) / len(completed_lengths),
+        "episode_length_std": float(np.std(completed_lengths)),
         "return_mean": sum(completed_returns) / len(completed_returns),
         "deaths": deaths,
         "timeouts": timeouts,
         "death_rate": 100.0 * deaths / len(completed_lengths),
         "timeout_rate": 100.0 * timeouts / len(completed_lengths),
+        "success_rate": 100.0 * timeouts / len(completed_lengths),
         "rmse": float(target_rmse.square().mean().sqrt()),
         "target_rmse": target_rmse.tolist(),
     }
@@ -252,6 +336,7 @@ def _fit_model(
     batch_size: int,
     learning_rate: float,
     device: str,
+    epoch_callback: Callable[[dict], None] | None = None,
 ) -> dict:
     model.to(device)
     size = len(targets)
@@ -283,6 +368,8 @@ def _fit_model(
             )
         row = {"epoch": epoch + 1, "train_mse": train_total / len(training_ids), "validation_mse": validation_loss}
         history.append(row)
+        if epoch_callback is not None:
+            epoch_callback(row)
         if validation_loss < best_loss:
             best_loss = validation_loss
             best_state = copy.deepcopy(model.state_dict())
@@ -298,12 +385,15 @@ def train_estimator(
     batch_size: int = 1024,
     learning_rate: float = 1.0e-3,
     device: str = "cuda:0",
+    epoch_callback: Callable[[dict], None] | None = None,
 ) -> dict:
     inputs = dataset.frames if estimator_type.upper() == "MLP" else dataset.histories
     estimator.to(inputs.device)
     estimator.set_normalization(inputs, dataset.targets)
     normalized_targets = estimator.normalized_targets(dataset.targets)
-    return _fit_model(estimator, inputs, normalized_targets, epochs, batch_size, learning_rate, device)
+    return _fit_model(
+        estimator, inputs, normalized_targets, epochs, batch_size, learning_rate, device, epoch_callback
+    )
 
 
 def evaluate_predictions(
